@@ -35,7 +35,6 @@ export function createLogger() {
         const panel = document.getElementById('logPanel');
         const toggle = document.getElementById('logToggle');
         if (!panel || !toggle) return;
-        panel.classList.toggle('collapsed');
         panel.classList.toggle('expanded');
         toggle.textContent = panel.classList.contains('expanded') ? '▼' : '▲';
     }

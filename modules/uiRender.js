@@ -11,16 +11,14 @@ export function updateConnectionStatus(connected) {
     const text = document.getElementById('statusText');
     const btn = document.getElementById('connectBtn');
 
-    if (!dot || !text || !btn) return;
-
     if (connected) {
-        dot.classList.add('connected');
-        text.textContent = 'Connected';
-        btn.textContent = 'Change iPod';
+        if (dot) dot.classList.add('connected');
+        if (text) text.textContent = 'Connected';
+        if (btn) btn.textContent = 'Change iPod';
     } else {
-        dot.classList.remove('connected');
-        text.textContent = 'Not Connected';
-        btn.textContent = 'Select iPod';
+        if (dot) dot.classList.remove('connected');
+        if (text) text.textContent = 'Not Connected';
+        if (btn) btn.textContent = 'Select iPod';
     }
 }
 
@@ -72,6 +70,7 @@ export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCoun
     const list = document.getElementById('playlistList');
     if (!list) return;
 
+    // "All Tracks" is always first in the Library section
     let html = `
         <li class="playlist-item ${currentPlaylistIndex === -1 ? 'active' : ''}"
             onclick="selectPlaylist(-1)">
@@ -80,7 +79,8 @@ export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCoun
         </li>
     `;
 
-    html += (playlists || [])
+    // User playlists (excluding master)
+    const userPlaylists = (playlists || [])
         .map((pl, idx) => {
             if (pl.is_master) return '';
             return `
@@ -94,6 +94,7 @@ export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCoun
         })
         .join('');
 
+    html += userPlaylists;
     list.innerHTML = html;
 }
 

@@ -99,6 +99,15 @@ async function saveDatabase() {
     await fsSync.syncVirtualFSToIpod(ipodHandle);
     await refreshCurrentView();
     log('Database saved successfully', 'success');
+    showSuccessModal();
+}
+
+function showSuccessModal() {
+    document.getElementById('successModal')?.classList.add('show');
+}
+
+function hideSuccessModal() {
+    document.getElementById('successModal')?.classList.remove('show');
 }
 
 // === Connect / FS ===
@@ -367,44 +376,44 @@ function filterTracks() {
 
 // === Drag & drop ===
 function initDragAndDrop() {
-    const dropZone = document.getElementById('dropZone');
+const dropZone = document.getElementById('dropZone');
     if (!dropZone) return;
 
-    dropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropZone.classList.add('dragover');
-    });
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+});
 
-    dropZone.addEventListener('dragleave', () => {
-        dropZone.classList.remove('dragover');
-    });
+dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+});
 
-    dropZone.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('dragover');
+dropZone.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
 
-        if (!isConnected) {
-            log('Please connect an iPod first', 'warning');
-            return;
-        }
+    if (!isConnected) {
+        log('Please connect an iPod first', 'warning');
+        return;
+    }
 
         const files = Array.from(e.dataTransfer.items)
             .filter(item => item.kind === 'file')
             .map(item => item.getAsFile())
             .filter(file => file && isAudioFile(file.name));
 
-        if (files.length === 0) {
-            log('No audio files found in drop', 'warning');
-            return;
-        }
+    if (files.length === 0) {
+        log('No audio files found in drop', 'warning');
+        return;
+    }
 
-        log(`Dropped ${files.length} files`, 'info');
+    log(`Dropped ${files.length} files`, 'info');
         document.getElementById('uploadModal')?.classList.add('show');
 
-        for (let i = 0; i < files.length; i++) {
-            updateUploadProgress(i + 1, files.length, files[i].name);
-            await uploadSingleTrack(files[i]);
-        }
+    for (let i = 0; i < files.length; i++) {
+        updateUploadProgress(i + 1, files.length, files[i].name);
+        await uploadSingleTrack(files[i]);
+    }
 
         document.getElementById('uploadModal')?.classList.remove('show');
         await refreshCurrentView();
@@ -440,6 +449,7 @@ Object.assign(window, {
     addTrackToPlaylist,
     removeTrackFromPlaylist,
     hideContextMenu: contextMenu.hideContextMenu,
+    hideSuccessModal,
 });
 
 // === Initialization ===
