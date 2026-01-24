@@ -16,11 +16,11 @@ export function updateConnectionStatus(connected) {
     if (connected) {
         dot.classList.add('connected');
         text.textContent = 'Connected';
-        btn.textContent = '📁 Change iPod';
+        btn.textContent = 'Change iPod';
     } else {
         dot.classList.remove('connected');
         text.textContent = 'Not Connected';
-        btn.textContent = '📁 Select iPod';
+        btn.textContent = 'Select iPod';
     }
 }
 
@@ -42,7 +42,6 @@ export function renderTracks({ tracks, escapeHtml }) {
         table.style.display = 'none';
         emptyState.style.display = 'flex';
         emptyState.innerHTML = `
-            <div class="icon">🎵</div>
             <h2>No Tracks</h2>
             <p>Upload some music to get started</p>
         `;
@@ -62,7 +61,7 @@ export function renderTracks({ tracks, escapeHtml }) {
             <td class="duration">${formatDuration(track.tracklen)}</td>
             <td>
                 <button class="btn btn-secondary" onclick="deleteTrack(${track.id})" style="padding: 5px 10px; font-size: 0.8rem;">
-                    🗑️
+                    Delete
                 </button>
             </td>
         </tr>
@@ -76,7 +75,7 @@ export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCoun
     let html = `
         <li class="playlist-item ${currentPlaylistIndex === -1 ? 'active' : ''}"
             onclick="selectPlaylist(-1)">
-            <span>📚 All Tracks</span>
+            <span>All Tracks</span>
             <span class="track-count">${allTracksCount}</span>
         </li>
     `;
@@ -84,12 +83,11 @@ export function renderPlaylists({ playlists, currentPlaylistIndex, allTracksCoun
     html += (playlists || [])
         .map((pl, idx) => {
             if (pl.is_master) return '';
-            const icon = pl.is_podcast ? '🎙️' : pl.is_smart ? '⚡' : '📁';
             return `
                 <li class="playlist-item ${currentPlaylistIndex === idx ? 'active' : ''}"
                     data-playlist-index="${idx}"
                     onclick="selectPlaylist(${idx})">
-                    <span>${icon} ${escapeHtml(pl.name)}</span>
+                    <span>${escapeHtml(pl.name)}</span>
                     <span class="track-count">${pl.track_count}</span>
                 </li>
             `;

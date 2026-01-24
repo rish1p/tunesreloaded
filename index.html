@@ -543,14 +543,14 @@
 <body>
     <div class="container">
         <header>
-            <h1><span class="icon">🎵</span> TunesReloaded</h1>
+            <h1>TunesReloaded</h1>
             <div class="status-bar">
                 <div class="status-indicator">
                     <span class="status-dot" id="statusDot"></span>
                     <span id="statusText">Not Connected</span>
                 </div>
                 <button class="btn btn-primary" id="connectBtn" onclick="selectIpodFolder()">
-                    📁 Select iPod Folder
+                    Select iPod
                 </button>
             </div>
         </header>
@@ -566,7 +566,7 @@
 
                 <div style="margin-top: 20px;">
                     <button class="btn btn-secondary" id="newPlaylistBtn" onclick="showNewPlaylistModal()" disabled>
-                        ➕ New Playlist
+                        New Playlist
                     </button>
                 </div>
             </aside>
@@ -575,25 +575,24 @@
                 <div class="toolbar">
                     <input type="text" class="search-box" id="searchBox" placeholder="Search tracks..." oninput="filterTracks()">
                     <button class="btn btn-primary" id="uploadBtn" onclick="uploadTracks()" disabled>
-                        ⬆️ Upload Tracks
+                        Upload Tracks
                     </button>
                     <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>
-                        💾 Save Changes
+                        Save Changes
                     </button>
                     <button class="btn btn-secondary" id="refreshBtn" onclick="refreshTracks()" disabled>
-                        🔄 Refresh
+                        Refresh
                     </button>
                 </div>
 
                 <div class="drop-zone" id="dropZone">
-                    <p>📂 Drag and drop audio files here, or click Upload Tracks</p>
+                    <p>Drag and drop audio files here, or click Upload Tracks</p>
                 </div>
 
                 <div class="track-table-container" id="trackTableContainer">
                     <div class="empty-state" id="emptyState">
-                        <div class="icon">📱</div>
                         <h2>No iPod Connected</h2>
-                        <p>Click "Select iPod Folder" to get started</p>
+                        <p>Click "Select iPod" to get started</p>
                     </div>
 
                     <table class="track-table" id="trackTable" style="display: none;">
@@ -619,7 +618,7 @@
     <!-- Log Panel -->
     <div class="log-panel collapsed" id="logPanel">
         <div class="log-header" onclick="toggleLogPanel()">
-            <h3>📋 Console Log <span id="logCount">(0)</span></h3>
+            <h3>Console Log <span id="logCount">(0)</span></h3>
             <span id="logToggle">▲</span>
         </div>
         <div class="log-content" id="logContent">
@@ -656,21 +655,16 @@
     <!-- Context Menu -->
     <div class="context-menu" id="contextMenu">
         <div class="context-menu-item" id="contextDeletePlaylist" style="display: none;">
-            <span>🗑️</span>
             <span>Delete Playlist</span>
         </div>
         <div class="context-menu-item" id="contextDeleteTrack" style="display: none;">
-            <span>🗑️</span>
             <span>Delete Track</span>
         </div>
         <div class="context-menu-item context-submenu" id="contextAddToPlaylist" style="display: none;">
-            <span>➕</span>
             <span>Add to Playlist</span>
-            <span style="margin-left: auto;">▶</span>
             <div class="context-submenu-items" id="playlistSubmenu"></div>
         </div>
         <div class="context-menu-item" id="contextRemoveFromPlaylist" style="display: none;">
-            <span>➖</span>
             <span>Remove from Playlist</span>
         </div>
     </div>
