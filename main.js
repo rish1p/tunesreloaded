@@ -23,6 +23,19 @@ const fsSync = createFsSync({ log, wasm, mountpoint: '/iPod' });
 const firewireSetup = createFirewireSetup({ log });
 const modals = createModalManager();
 
+function getLastWasmErrorMessage() {
+    try {
+        const ptr = wasm.wasmCall('ipod_get_last_error');
+        return ptr ? wasm.wasmGetString(ptr) : 'Unknown error';
+    } catch (_) {
+        return 'Unknown error';
+    }
+}
+
+function logWasmError(prefix) {
+    log(`${prefix}: ${getLastWasmErrorMessage()}`, 'error');
+}
+
 // === Database / view refresh ===
 async function parseDatabase() {
     log('Parsing iTunesDB...');
@@ -46,12 +59,7 @@ async function loadTracks() {
 
         // Ensure the sidebar "All Tracks" count reflects the latest track list,
         // since refreshCurrentView() loads playlists before tracks.
-        renderPlaylists({
-            playlists: appState.playlists,
-            currentPlaylistIndex: appState.currentPlaylistIndex,
-            allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
-            escapeHtml,
-        });
+        renderSidebarPlaylists();
     }
 }
 
@@ -69,15 +77,23 @@ function getAllTracksWithQueued() {
     return [...(appState.tracks || []), ...queued];
 }
 
-function rerenderAllTracksIfVisible() {
-    if (appState.currentPlaylistIndex !== -1) return;
-    renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+function getAllTracksCount() {
+    return (appState.tracks?.length || 0) + (appState.pendingUploads?.length || 0);
+}
+
+function renderSidebarPlaylists() {
     renderPlaylists({
         playlists: appState.playlists,
         currentPlaylistIndex: appState.currentPlaylistIndex,
-        allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
+        allTracksCount: getAllTracksCount(),
         escapeHtml,
     });
+}
+
+function rerenderAllTracksIfVisible() {
+    if (appState.currentPlaylistIndex !== -1) return;
+    renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
+    renderSidebarPlaylists();
 }
 
 async function loadPlaylists() {
@@ -85,12 +101,7 @@ async function loadPlaylists() {
     const playlists = wasm.wasmGetJson('ipod_get_all_playlists_json');
     if (playlists) {
         appState.playlists = playlists;
-        renderPlaylists({
-            playlists,
-            currentPlaylistIndex: appState.currentPlaylistIndex,
-            allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
-            escapeHtml,
-        });
+        renderSidebarPlaylists();
     }
 }
 
@@ -372,8 +383,7 @@ function createPlaylist() {
 
     const result = wasm.wasmCallWithStrings('ipod_create_playlist', [name]);
     if (result < 0) {
-        const errorPtr = wasm.wasmCall('ipod_get_last_error');
-        log(`Failed to create playlist: ${wasm.wasmGetString(errorPtr)}`, 'error');
+        logWasmError('Failed to create playlist');
         return;
     }
 
@@ -431,8 +441,7 @@ async function addTrackToPlaylist(trackId, playlistIndex) {
         await loadPlaylists();
         log(`Added track to playlist: ${playlist.name}`, 'success');
     } else {
-        const errorPtr = wasm.wasmCall('ipod_get_last_error');
-        log(`Failed to add track: ${wasm.wasmGetString(errorPtr)}`, 'error');
+        logWasmError('Failed to add track');
     }
 }
 
@@ -452,8 +461,7 @@ async function removeTrackFromPlaylist(trackId) {
 
     const result = wasm.wasmCall('ipod_playlist_remove_track', idx, trackId);
     if (result !== 0) {
-        const errorPtr = wasm.wasmCall('ipod_get_last_error');
-        log(`Failed to remove track: ${wasm.wasmGetString(errorPtr)}`, 'error');
+        logWasmError('Failed to remove track');
         return;
     }
 
@@ -473,58 +481,59 @@ function updateUploadProgress(current, total, filename) {
     });
 }
 
-function queueFileHandlesForSync(fileHandles) {
-    const queued = (fileHandles || []).map((handle) => ({
-        kind: 'handle',
-        handle,
-        name: handle?.name || 'Unknown',
-        status: 'queued',
-        meta: null,
-    }));
+function appendPendingUploads(queued) {
     appState.pendingUploads = [...(appState.pendingUploads || []), ...queued];
     log(`Queued ${queued.length} track(s). Click “Sync iPod” to transfer.`, 'success');
     rerenderAllTracksIfVisible();
+}
 
+async function enrichQueuedUploadsWithTags(queued, getFile) {
     // Best-effort metadata read (fast; does not stage audio into WASM FS)
-    void (async () => {
-        for (const item of queued) {
-            try {
-                const file = await item.handle.getFile();
-                const tags = await readAudioTags(file);
-                item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
-            } catch (_) {
-                // ignore
-            }
+    for (const item of queued) {
+        try {
+            const file = await getFile(item);
+            const tags = await readAudioTags(file);
+            item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
+        } catch (_) {
+            // ignore
         }
-        appState.pendingUploads = [...(appState.pendingUploads || [])];
-        rerenderAllTracksIfVisible();
-    })();
+    }
+    // Trigger UI refresh with updated metadata
+    appState.pendingUploads = [...(appState.pendingUploads || [])];
+    rerenderAllTracksIfVisible();
+}
+
+function queueUploads({ kind, items, getFileForTags }) {
+    const queued = (items || []).map((value) => ({
+        kind,
+        handle: kind === 'handle' ? value : undefined,
+        file: kind === 'file' ? value : undefined,
+        name: value?.name || 'Unknown',
+        status: 'queued',
+        meta: null,
+    }));
+
+    appendPendingUploads(queued);
+
+    if (getFileForTags) {
+        void enrichQueuedUploadsWithTags(queued, getFileForTags);
+    }
+}
+
+function queueFileHandlesForSync(fileHandles) {
+    queueUploads({
+        kind: 'handle',
+        items: fileHandles,
+        getFileForTags: (item) => item.handle.getFile(),
+    });
 }
 
 function queueFilesForSync(files) {
-    const queued = (files || []).map((file) => ({
+    queueUploads({
         kind: 'file',
-        file,
-        name: file?.name || 'Unknown',
-        status: 'queued',
-        meta: null,
-    }));
-    appState.pendingUploads = [...(appState.pendingUploads || []), ...queued];
-    log(`Queued ${queued.length} track(s). Click “Sync iPod” to transfer.`, 'success');
-    rerenderAllTracksIfVisible();
-
-    void (async () => {
-        for (const item of queued) {
-            try {
-                const tags = await readAudioTags(item.file);
-                item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
-            } catch (_) {
-                // ignore
-            }
-        }
-        appState.pendingUploads = [...(appState.pendingUploads || [])];
-        rerenderAllTracksIfVisible();
-    })();
+        items: files,
+        getFileForTags: (item) => item.file,
+    });
 }
 
 function removeQueuedTrack(queueIndex) {
@@ -578,8 +587,7 @@ async function uploadSingleTrack(file) {
     });
 
     if (trackIndex < 0) {
-        const errorPtr = wasm.wasmCall('ipod_get_last_error');
-        log(`Failed to add track: ${wasm.wasmGetString(errorPtr)}`, 'error');
+        logWasmError('Failed to add track');
         return false;
     }
 
@@ -620,12 +628,7 @@ async function uploadSingleTrack(file) {
 // === Search / playlist selection ===
 function selectPlaylist(index) {
     appState.currentPlaylistIndex = index;
-    renderPlaylists({
-        playlists: appState.playlists,
-        currentPlaylistIndex: index,
-        allTracksCount: appState.tracks.length + (appState.pendingUploads?.length || 0),
-        escapeHtml,
-    });
+    renderSidebarPlaylists();
     if (index === -1) {
         renderTracks({ tracks: getAllTracksWithQueued(), escapeHtml });
     } else {
