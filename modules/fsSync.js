@@ -4,14 +4,46 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         return Module?.FS;
     }
 
+    async function listDirNames(dirHandle, limit = 50) {
+        const names = [];
+        try {
+            for await (const [name] of dirHandle.entries()) {
+                names.push(name);
+                if (names.length >= limit) break;
+            }
+        } catch (_) {
+            // ignore
+        }
+        names.sort((a, b) => a.localeCompare(b));
+        return names;
+    }
+
     async function verifyIpodStructure(handle) {
         try {
             const controlDir = await handle.getDirectoryHandle('iPod_Control', { create: false });
-            const itunesDir = await controlDir.getDirectoryHandle('iTunes', { create: false });
-            await itunesDir.getFileHandle('iTunesDB', { create: false });
-            log('Found iPod_Control directory', 'success');
+
+            let itunesDir;
+            try {
+                itunesDir = await controlDir.getDirectoryHandle('iTunes', { create: false });
+            } catch (e) {
+                const names = await listDirNames(controlDir);
+                log(`Missing iPod_Control/iTunes. Found in iPod_Control: ${names.join(', ') || '(empty)'}`, 'error');
+                return false;
+            }
+
+            try {
+                await itunesDir.getFileHandle('iTunesDB', { create: false });
+            } catch (e) {
+                const names = await listDirNames(itunesDir);
+                log(`Missing iPod_Control/iTunes/iTunesDB. Found in iTunes: ${names.join(', ') || '(empty)'}`, 'error');
+                return false;
+            }
+
+            log('Found iPod_Control/iTunes/iTunesDB', 'success');
             return true;
-        } catch (_) {
+        } catch (e) {
+            const names = await listDirNames(handle);
+            log(`Missing iPod_Control in selected folder. Found: ${names.join(', ') || '(empty)'}`, 'error');
             return false;
         }
     }
@@ -51,11 +83,11 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         const FS = getFS();
         if (!FS) throw new Error('WASM FS not ready');
 
-        const iPodControlHandle = await handle.getDirectoryHandle('iPod_Control');
-        const iTunesHandle = await iPodControlHandle.getDirectoryHandle('iTunes');
+        const iPodControlHandle = await handle.getDirectoryHandle('iPod_Control', { create: false });
+        const iTunesHandle = await iPodControlHandle.getDirectoryHandle('iTunes', { create: false });
 
         // Copy iTunesDB
-        const dbFileHandle = await iTunesHandle.getFileHandle('iTunesDB');
+        const dbFileHandle = await iTunesHandle.getFileHandle('iTunesDB', { create: false });
         const dbFile = await dbFileHandle.getFile();
         const dbData = new Uint8Array(await dbFile.arrayBuffer());
         FS.writeFile(`${mountpoint}/iPod_Control/iTunes/iTunesDB`, dbData);
@@ -112,7 +144,6 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
             await syncVirtualFileToReal(ipodHandle, `${mountpoint}/iPod_Control/iTunes/iTunesDB`, ['iPod_Control', 'iTunes'], 'iTunesDB');
             await syncVirtualFileToReal(ipodHandle, `${mountpoint}/iPod_Control/iTunes/iTunesSD`, ['iPod_Control', 'iTunes'], 'iTunesSD', true);
             await syncMusicFilesToReal(ipodHandle);
-            log('Sync complete', 'success');
         } catch (e) {
             log(`Sync error: ${e.message || e.toString() || 'Unknown error'}`, 'error');
         }
@@ -121,6 +152,8 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
     async function syncMusicFilesToReal(ipodHandle) {
         const FS = getFS();
         if (!FS) throw new Error('WASM FS not ready');
+
+        let syncedCount = 0;
 
         try {
             const vfsMusicPath = `${mountpoint}/iPod_Control/Music`;
@@ -160,11 +193,14 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
                         const writable = await fileHandle.createWritable();
                         await writable.write(fileData);
                         await writable.close();
-                        log(`Synced music file: ${folder}/${file}`, 'info');
+                        syncedCount++;
                     } catch (e) {
                         log(`Could not sync ${folder}/${file}: ${e.message}`, 'warning');
                     }
                 }
+            }
+            if (syncedCount > 0) {
+                log(`Synced ${syncedCount} music file${syncedCount > 1 ? 's' : ''} to iPod`, 'info');
             }
         } catch (e) {
             log(`Error syncing music files: ${e.message}`, 'warning');

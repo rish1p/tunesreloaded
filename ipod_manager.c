@@ -12,11 +12,13 @@
 #include <time.h>
 #include <emscripten.h>
 #include "itdb.h"
+#include "itdb_device.h"
 
 /* Global database pointer */
 static Itdb_iTunesDB *g_itdb = NULL;
 static char g_mountpoint[4096] = "";
 static char g_last_error[1024] = "";
+static Itdb_Track *g_last_added_track = NULL;  /* Track pointer for finalization */
 
 /* ============================================================================
  * Utility Functions
@@ -115,6 +117,152 @@ static int escape_json_string(char *dest, const char *src, size_t max_len) {
 }
 
 /* ============================================================================
+ * Debug Functions
+ * ============================================================================ */
+
+/**
+ * Log detailed device info for debugging iPod model detection issues
+ */
+static void log_device_info(Itdb_iTunesDB *itdb) {
+    if (!itdb || !itdb->device) {
+        printf("[DEBUG] Device info: No device attached to database\n");
+        return;
+    }
+    
+    Itdb_Device *device = itdb->device;
+    
+    printf("[DEBUG] ====== iPod Device Information ======\n");
+    
+    /* Get iPod info struct */
+    const Itdb_IpodInfo *info = itdb_device_get_ipod_info(device);
+    if (info) {
+        const gchar *model_name = itdb_info_get_ipod_model_name_string(info->ipod_model);
+        const gchar *gen_name = itdb_info_get_ipod_generation_string(info->ipod_generation);
+        printf("[DEBUG] Model Name: %s\n", model_name ? model_name : "(unknown)");
+        printf("[DEBUG] Generation Name: %s\n", gen_name ? gen_name : "(unknown)");
+        printf("[DEBUG] Model Number: %s\n", info->model_number ? info->model_number : "(null)");
+        printf("[DEBUG] Generation (enum): %d\n", info->ipod_generation);
+        printf("[DEBUG] Capacity (GB): %.1f\n", info->capacity);
+        printf("[DEBUG] iPod Model (enum): %d\n", info->ipod_model);
+    } else {
+        printf("[DEBUG] iPod Info: NULL (device not recognized)\n");
+    }
+    
+    /* Get SysInfo values */
+    const gchar *firewire_guid = itdb_device_get_sysinfo(device, "FirewireGuid");
+    const gchar *serial_number = itdb_device_get_sysinfo(device, "SerialNumber");
+    const gchar *model_num_str = itdb_device_get_sysinfo(device, "ModelNumStr");
+    const gchar *board_type = itdb_device_get_sysinfo(device, "BoardType");
+    const gchar *build_id = itdb_device_get_sysinfo(device, "BuildID");
+    const gchar *visual_name = itdb_device_get_sysinfo(device, "VisibleBuildID");
+    
+    printf("[DEBUG] SysInfo FirewireGuid: %s\n", firewire_guid ? firewire_guid : "(not set)");
+    printf("[DEBUG] SysInfo SerialNumber: %s\n", serial_number ? serial_number : "(not set)");
+    printf("[DEBUG] SysInfo ModelNumStr: %s\n", model_num_str ? model_num_str : "(not set)");
+    printf("[DEBUG] SysInfo BoardType: %s\n", board_type ? board_type : "(not set)");
+    printf("[DEBUG] SysInfo BuildID: %s\n", build_id ? build_id : "(not set)");
+    printf("[DEBUG] SysInfo VisibleBuildID: %s\n", visual_name ? visual_name : "(not set)");
+    
+    /* Check if device supports artwork (correlates with newer models) */
+    gboolean supports_artwork = itdb_device_supports_artwork(device);
+    printf("[DEBUG] Supports Artwork: %s\n", supports_artwork ? "yes" : "no");
+
+    /* For iPod Classic 6G+: libgpod requires writing a device-specific hash.
+     * This is driven by checksum type + a derived FirewireId (from SysInfo FirewireGuid). */
+    ItdbChecksumType checksum_type = itdb_device_get_checksum_type(device);
+    printf("[DEBUG] Checksum Type: %d\n", (int)checksum_type);
+
+    const char *firewire_id = itdb_device_get_firewire_id(device);
+    printf("[DEBUG] FirewireId: %s\n", firewire_id ? firewire_id : "(null)");
+
+    if (checksum_type != ITDB_CHECKSUM_NONE && (!firewire_id || firewire_id[0] == '\0')) {
+        printf("[DEBUG] WARNING: Checksum required but FirewireId is 0 (SysInfo FirewireGuid likely missing/invalid)\n");
+    }
+    
+    printf("[DEBUG] ==========================================\n");
+}
+
+/**
+ * Get device info as JSON string (caller must free)
+ * Useful for debugging from JavaScript
+ */
+EMSCRIPTEN_KEEPALIVE
+char* ipod_get_device_info_json(void) {
+    static char buffer[4096];
+    
+    if (!g_itdb || !g_itdb->device) {
+        snprintf(buffer, sizeof(buffer), "{\"error\": \"No device loaded\"}");
+        return buffer;
+    }
+    
+    Itdb_Device *device = g_itdb->device;
+    const Itdb_IpodInfo *info = itdb_device_get_ipod_info(device);
+    
+    const gchar *firewire_guid = itdb_device_get_sysinfo(device, "FirewireGuid");
+    const gchar *serial_number = itdb_device_get_sysinfo(device, "SerialNumber");
+    const gchar *model_num_str = itdb_device_get_sysinfo(device, "ModelNumStr");
+    const gchar *board_type = itdb_device_get_sysinfo(device, "BoardType");
+
+    ItdbChecksumType checksum_type = itdb_device_get_checksum_type(device);
+    const char *firewire_id = itdb_device_get_firewire_id(device);
+    
+    char model_name_escaped[256] = "";
+    char gen_name_escaped[128] = "";
+    char model_number_escaped[64] = "";
+    char firewire_escaped[128] = "";
+    char firewire_id_escaped[128] = "";
+    char serial_escaped[128] = "";
+    char model_str_escaped[64] = "";
+    char board_escaped[64] = "";
+    
+    if (info) {
+        const gchar *model_name = itdb_info_get_ipod_model_name_string(info->ipod_model);
+        const gchar *gen_name = itdb_info_get_ipod_generation_string(info->ipod_generation);
+        if (model_name) escape_json_string(model_name_escaped, model_name, sizeof(model_name_escaped));
+        if (gen_name) escape_json_string(gen_name_escaped, gen_name, sizeof(gen_name_escaped));
+        if (info->model_number) escape_json_string(model_number_escaped, info->model_number, sizeof(model_number_escaped));
+    }
+    if (firewire_guid) escape_json_string(firewire_escaped, firewire_guid, sizeof(firewire_escaped));
+    if (firewire_id) escape_json_string(firewire_id_escaped, firewire_id, sizeof(firewire_id_escaped));
+    if (serial_number) escape_json_string(serial_escaped, serial_number, sizeof(serial_escaped));
+    if (model_num_str) escape_json_string(model_str_escaped, model_num_str, sizeof(model_str_escaped));
+    if (board_type) escape_json_string(board_escaped, board_type, sizeof(board_escaped));
+    
+    snprintf(buffer, sizeof(buffer),
+        "{"
+        "\"model_name\": \"%s\","
+        "\"generation_name\": \"%s\","
+        "\"model_number\": \"%s\","
+        "\"generation\": %d,"
+        "\"capacity_gb\": %.1f,"
+        "\"ipod_model\": %d,"
+        "\"firewire_guid\": \"%s\","
+        "\"firewire_id\": \"%s\","
+        "\"checksum_type\": %d,"
+        "\"serial_number\": \"%s\","
+        "\"model_num_str\": \"%s\","
+        "\"board_type\": \"%s\","
+        "\"device_recognized\": %s"
+        "}",
+        model_name_escaped,
+        gen_name_escaped,
+        model_number_escaped,
+        info ? info->ipod_generation : -1,
+        info ? info->capacity : 0.0,
+        info ? info->ipod_model : -1,
+        firewire_escaped,
+        firewire_id_escaped,
+        (int)checksum_type,
+        serial_escaped,
+        model_str_escaped,
+        board_escaped,
+        (info && info->ipod_generation > 0) ? "true" : "false"
+    );
+    
+    return buffer;
+}
+
+/* ============================================================================
  * Database Functions
  * ============================================================================ */
 
@@ -209,6 +357,10 @@ int ipod_parse_db(void) {
     
     log_info("Successfully parsed iTunesDB. Tracks: %u, Playlists: %u",
              itdb_tracks_number(g_itdb), itdb_playlists_number(g_itdb));
+    
+    // Debug: Log device info to help diagnose model detection issues
+    log_device_info(g_itdb);
+    
     return 0;
 }
 
@@ -333,6 +485,14 @@ int ipod_write_db(void) {
     }
 
     log_info("Writing iTunesDB...");
+    
+    // Disable smart playlists to prevent validation issues
+    for (GList *l = g_itdb->playlists; l != NULL; l = l->next) {
+        Itdb_Playlist *pl = (Itdb_Playlist *)l->data;
+        if (pl && pl->is_spl) {
+            pl->is_spl = FALSE;
+        }
+    }
 
     if (!itdb_write(g_itdb, &error)) {
         if (error) {
@@ -413,9 +573,11 @@ char* ipod_get_track_json(int index) {
     escape_json_string(genre_esc, track->genre, sizeof(genre_esc));
     escape_json_string(path_esc, track->ipod_path, sizeof(path_esc));
 
+    /* NOTE: "id" is the track INDEX in the list, not track->id
+     * This is because track->id is 0 for newly added tracks until itdb_write() */
     snprintf(json, 8192,
         "{"
-        "\"id\":%u,"
+        "\"id\":%d,"
         "\"dbid\":%llu,"
         "\"title\":\"%s\","
         "\"artist\":\"%s\","
@@ -433,7 +595,7 @@ char* ipod_get_track_json(int index) {
         "\"ipod_path\":\"%s\","
         "\"transferred\":%s"
         "}",
-        track->id,
+        index,  /* Use index instead of track->id */
         (unsigned long long)track->dbid,
         title_esc,
         artist_esc,
@@ -591,29 +753,39 @@ int ipod_add_track(
         itdb_playlist_add_track(mpl, track, -1);
     }
 
-    log_info("Added track: %s - %s (ID: %u)",
+    /* Store pointer for finalization (IDs are not assigned until write) */
+    g_last_added_track = track;
+
+    /* Return track position in list (since ID is always 0 until write) */
+    int track_index = g_list_index(g_itdb->tracks, track);
+    
+    log_info("Added track: %s - %s (index: %d)",
              artist ? artist : "Unknown",
              title ? title : "Unknown",
-             track->id);
+             track_index);
 
-    return (int)track->id;
+    return track_index;
 }
 
 /**
  * Finalize track after file is copied using libgpod's proper function
  * This sets ipod_path, filetype_marker, transferred, and size
+ * @track_index: index of track in the tracks list (NOT the track ID!)
  * @dest_filename: filesystem path (with slashes), not iPod path (with colons)
+ * 
+ * NOTE: Track IDs are 0 until itdb_write() is called. Use track_index instead.
  */
 EMSCRIPTEN_KEEPALIVE
-int ipod_track_finalize(int track_id, const char *dest_filename) {
+int ipod_track_finalize(int track_index, const char *dest_filename) {
     if (!g_itdb) {
         set_error("No database loaded");
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    /* Use track index to find the track (IDs are not assigned until write) */
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
@@ -634,24 +806,58 @@ int ipod_track_finalize(int track_id, const char *dest_filename) {
         return -1;
     }
 
-    log_info("Finalized track %d: %s", track_id, track->ipod_path ? track->ipod_path : "NULL");
+    log_info("Finalized track index %d: %s", track_index, track->ipod_path ? track->ipod_path : "NULL");
     return 0;
 }
 
 /**
- * Set the iPod path for a track (legacy function - use ipod_track_finalize instead)
- * Kept for backwards compatibility
+ * Finalize the most recently added track
+ * This is the preferred method - uses the stored track pointer directly
  */
 EMSCRIPTEN_KEEPALIVE
-int ipod_track_set_path(int track_id, const char *ipod_path) {
+int ipod_finalize_last_track(const char *dest_filename) {
     if (!g_itdb) {
         set_error("No database loaded");
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    if (!g_last_added_track) {
+        set_error("No track has been added yet");
+        return -1;
+    }
+
+    GError *error = NULL;
+    Itdb_Track *finalized = itdb_cp_finalize(g_last_added_track, g_mountpoint, dest_filename, &error);
+    
+    if (!finalized) {
+        if (error) {
+            set_error("Failed to finalize track: %s", error->message);
+            g_error_free(error);
+        } else {
+            set_error("Failed to finalize track: Unknown error");
+        }
+        return -1;
+    }
+
+    log_info("Finalized last track: %s", g_last_added_track->ipod_path ? g_last_added_track->ipod_path : "NULL");
+    return 0;
+}
+
+/**
+ * Set the iPod path for a track (legacy function - use ipod_track_finalize instead)
+ * @track_index: index of track in the tracks list (NOT the track ID!)
+ * Kept for backwards compatibility
+ */
+EMSCRIPTEN_KEEPALIVE
+int ipod_track_set_path(int track_index, const char *ipod_path) {
+    if (!g_itdb) {
+        set_error("No database loaded");
+        return -1;
+    }
+
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
@@ -661,7 +867,7 @@ int ipod_track_set_path(int track_id, const char *ipod_path) {
     track->ipod_path = g_strdup(ipod_path);
     track->transferred = TRUE;
 
-    log_info("Set path for track %d: %s", track_id, ipod_path);
+    log_info("Set path for track index %d: %s", track_index, ipod_path);
     return 0;
 }
 
@@ -698,17 +904,18 @@ char* ipod_get_track_dest_path(const char *original_filename) {
 
 /**
  * Remove a track from the database
+ * @track_index: index of track in the tracks list (NOT the track ID!)
  */
 EMSCRIPTEN_KEEPALIVE
-int ipod_remove_track(int track_id) {
+int ipod_remove_track(int track_index) {
     if (!g_itdb) {
         set_error("No database loaded");
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
@@ -722,7 +929,7 @@ int ipod_remove_track(int track_id) {
         Itdb_Playlist *pl = (Itdb_Playlist *)l->data;
         if (pl && itdb_playlist_contains_track(pl, track)) {
             itdb_playlist_remove_track(pl, track);
-            log_info("Removed track %d from playlist: %s", track_id, pl->name ? pl->name : "Unknown");
+            log_info("Removed track index %d from playlist: %s", track_index, pl->name ? pl->name : "Unknown");
         }
     }
 
@@ -730,7 +937,12 @@ int ipod_remove_track(int track_id) {
     // This frees the track memory, so we can't access track after this call
     itdb_track_remove(track);
 
-    log_info("Removed track: %s (ID: %d)", title, track_id);
+    // Clear last_added_track if it was this track
+    if (g_last_added_track == track) {
+        g_last_added_track = NULL;
+    }
+
+    log_info("Removed track: %s (index: %d)", title, track_index);
     g_free(title);
 
     return 0;
@@ -738,10 +950,11 @@ int ipod_remove_track(int track_id) {
 
 /**
  * Update track metadata
+ * @track_index: index of track in the tracks list (NOT the track ID!)
  */
 EMSCRIPTEN_KEEPALIVE
 int ipod_update_track(
-    int track_id,
+    int track_index,
     const char *title,
     const char *artist,
     const char *album,
@@ -755,9 +968,9 @@ int ipod_update_track(
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
@@ -771,7 +984,7 @@ int ipod_update_track(
 
     track->time_modified = time(NULL);
 
-    log_info("Updated track: %d", track_id);
+    log_info("Updated track index: %d", track_index);
     return 0;
 }
 
@@ -1027,9 +1240,10 @@ int ipod_rename_playlist(int playlist_index, const char *new_name) {
 
 /**
  * Add a track to a playlist
+ * @track_index: index of track in the tracks list (NOT the track ID!)
  */
 EMSCRIPTEN_KEEPALIVE
-int ipod_playlist_add_track(int playlist_index, int track_id) {
+int ipod_playlist_add_track(int playlist_index, int track_index) {
     if (!g_itdb) {
         set_error("No database loaded");
         return -1;
@@ -1041,28 +1255,29 @@ int ipod_playlist_add_track(int playlist_index, int track_id) {
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
     if (itdb_playlist_contains_track(pl, track)) {
-        log_info("Track %d already in playlist %d", track_id, playlist_index);
+        log_info("Track index %d already in playlist %d", track_index, playlist_index);
         return 0; /* Not an error */
     }
 
     itdb_playlist_add_track(pl, track, -1);
 
-    log_info("Added track %d to playlist %d", track_id, playlist_index);
+    log_info("Added track index %d to playlist %d", track_index, playlist_index);
     return 0;
 }
 
 /**
  * Remove a track from a playlist
+ * @track_index: index of track in the tracks list (NOT the track ID!)
  */
 EMSCRIPTEN_KEEPALIVE
-int ipod_playlist_remove_track(int playlist_index, int track_id) {
+int ipod_playlist_remove_track(int playlist_index, int track_index) {
     if (!g_itdb) {
         set_error("No database loaded");
         return -1;
@@ -1074,20 +1289,20 @@ int ipod_playlist_remove_track(int playlist_index, int track_id) {
         return -1;
     }
 
-    Itdb_Track *track = itdb_track_by_id(g_itdb, (guint32)track_id);
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks, (guint)track_index);
     if (!track) {
-        set_error("Track not found: %d", track_id);
+        set_error("Track not found at index: %d", track_index);
         return -1;
     }
 
     if (!itdb_playlist_contains_track(pl, track)) {
-        set_error("Track %d not in playlist %d", track_id, playlist_index);
+        set_error("Track index %d not in playlist %d", track_index, playlist_index);
         return -1;
     }
 
     itdb_playlist_remove_track(pl, track);
 
-    log_info("Removed track %d from playlist %d", track_id, playlist_index);
+    log_info("Removed track index %d from playlist %d", track_index, playlist_index);
     return 0;
 }
 

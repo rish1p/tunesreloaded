@@ -112,7 +112,10 @@ async function selectIpodFolder() {
         log(`Selected folder: ${handle.name}`, 'success');
 
         const isValid = await fsSync.verifyIpodStructure(handle);
-        if (!isValid) log('Warning: This folder may not be an iPod. Looking for iPod_Control folder...', 'warning');
+        if (!isValid) {
+            log('This folder does not look like an iPod root. Please select the iPod volume root (must contain iPod_Control/iTunes/iTunesDB).', 'error');
+            return;
+        }
 
         // Check if FirewireGuid exists (needed for iPod Classic 6G+)
         const hasFirewireGuid = await firewireSetup.checkFirewireGuid(handle);
@@ -308,8 +311,6 @@ async function uploadTracks() {
 }
 
 async function uploadSingleTrack(file) {
-    log(`Uploading: ${file.name}`);
-
     const tags = await readAudioTags(file);
     const audioProps = await getAudioProperties(file);
     const buffer = await file.arrayBuffer();
@@ -317,7 +318,7 @@ async function uploadSingleTrack(file) {
 
     const filetype = getFiletypeFromName(file.name);
 
-    const trackId = wasm.wasmAddTrack({
+    const trackIndex = wasm.wasmAddTrack({
         title: tags.title || file.name.replace(/\.[^/.]+$/, ''),
         artist: tags.artist,
         album: tags.album,
@@ -332,7 +333,7 @@ async function uploadSingleTrack(file) {
         filetype,
     });
 
-    if (trackId < 0) {
+    if (trackIndex < 0) {
         const errorPtr = wasm.wasmCall('ipod_get_last_error');
         log(`Failed to add track: ${wasm.wasmGetString(errorPtr)}`, 'error');
         return;
@@ -353,21 +354,21 @@ async function uploadSingleTrack(file) {
 
     await fsSync.copyFileToVirtualFS(data, destPath);
 
+    // Use ipod_finalize_last_track which uses the stored track pointer directly
     const finalizePathPtr = wasm.wasmAllocString(destPath);
-    const result = wasm.wasmCallWithError('ipod_track_finalize', trackId, finalizePathPtr);
+    const result = wasm.wasmCallWithError('ipod_finalize_last_track', finalizePathPtr);
     wasm.wasmFreeString(finalizePathPtr);
 
     if (result !== 0) {
         const ipodPath = destPath.replace(/^\/iPod\//, '').replace(/\//g, ':');
-        wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackId]);
+        wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackIndex]);
     }
 
     if (currentPlaylistIndex >= 0 && currentPlaylistIndex < allPlaylists.length) {
-        const addResult = wasm.wasmCall('ipod_playlist_add_track', currentPlaylistIndex, trackId);
-        if (addResult === 0) log(`Added track to playlist: ${allPlaylists[currentPlaylistIndex].name}`, 'info');
+        wasm.wasmCall('ipod_playlist_add_track', currentPlaylistIndex, trackIndex);
     }
 
-    log(`Finalized: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
+    log(`Added: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
 }
 
 // === Search / playlist selection ===
