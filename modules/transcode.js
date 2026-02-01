@@ -89,6 +89,7 @@ export async function transcodeFlacToAlacM4a(file, { onProgress, onLog } = {}) {
         // -map 0:a:0 : pick first audio stream only
         // -vn/-sn/-dn: disable video/subtitle/data
         // -c:a alac   : encode ALAC
+        // -threads 0  : let ffmpeg auto-select thread count (works best with core-mt)
         // -map_metadata 0 : preserve tags where possible
         const rc = await ffmpeg.exec([
             '-i', inputName,
@@ -96,6 +97,7 @@ export async function transcodeFlacToAlacM4a(file, { onProgress, onLog } = {}) {
             '-vn', '-sn', '-dn',
             '-map_metadata', '0',
             '-c:a', 'alac',
+            '-threads', '0',
             outputName
         ]);
         if (rc !== 0) {
