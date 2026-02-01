@@ -8,6 +8,11 @@ import { createModalManager } from './modules/modalManager.js';
 import { createAppState } from './modules/state.js';
 import { readAudioMetadata, getFiletypeFromName, isAudioFile } from './modules/audio.js';
 import { renderTracks, renderPlaylists, formatDuration, updateConnectionStatus, enableUIIfReady } from './modules/uiRender.js';
+import { createIpodConnectionMonitor } from './modules/ipodConnectionMonitor.js';
+import { createUploadQueue } from './modules/uploadQueue.js';
+import { createTrackOps } from './modules/trackOps.js';
+import { createSyncPipeline } from './modules/syncPipeline.js';
+import { transcodeFlacToAlacM4a } from './modules/transcode.js';
 
 /**
  * TunesReloaded - module entrypoint
@@ -25,64 +30,16 @@ const paths = createPaths({ wasm, mountpoint: '/iPod' });
 const firewireSetup = createFirewireSetup({ log });
 const modals = createModalManager();
 
-// === iPod connection monitor (polling) ===
-let ipodMonitorTimer = null;
-let ipodMonitorBusy = false;
-
-function stopIpodConnectionMonitor() {
-    if (ipodMonitorTimer) {
-        clearInterval(ipodMonitorTimer);
-        ipodMonitorTimer = null;
-    }
-    ipodMonitorBusy = false;
-}
-
-async function handleIpodDisconnected(reason = 'Folder no longer accessible') {
-    if (!appState.isConnected) return;
-
-    stopIpodConnectionMonitor();
-    log(`iPod disconnected: ${reason}`, 'warning');
-
-    // Best-effort close DB in WASM
-    try { wasm.wasmCall('ipod_close_db'); } catch (_) {}
-
-    // Reset app state
-    appState.isConnected = false;
-    appState.ipodHandle = null;
-    appState.tracks = [];
-    appState.playlists = [];
-    appState.currentPlaylistIndex = -1;
-    appState.pendingUploads = [];
-    appState.pendingFileDeletes = [];
-
-    updateConnectionStatus(false);
-    enableUIIfReady({ wasmReady: appState.wasmReady, isConnected: false });
-
-    // Clear UI
-    renderTracks({ tracks: [], escapeHtml });
-    renderSidebarPlaylists();
-}
-
-function startIpodConnectionMonitor() {
-    stopIpodConnectionMonitor();
-
-    ipodMonitorTimer = setInterval(async () => {
-        if (ipodMonitorBusy) return;
-        if (!appState.isConnected || !appState.ipodHandle) return;
-
-        ipodMonitorBusy = true;
-        try {
-            // Lightweight probe: does the expected iPod structure still exist?
-            const control = await appState.ipodHandle.getDirectoryHandle('iPod_Control', { create: false });
-            const itunes = await control.getDirectoryHandle('iTunes', { create: false });
-            await itunes.getFileHandle('iTunesDB', { create: false });
-        } catch (e) {
-            await handleIpodDisconnected(e?.name || e?.message || 'Disconnected');
-        } finally {
-            ipodMonitorBusy = false;
-        }
-    }, 3000);
-}
+const ipodMonitor = createIpodConnectionMonitor({
+    appState,
+    wasm,
+    log,
+    updateConnectionStatus,
+    enableUIIfReady,
+    renderTracks,
+    renderSidebarPlaylists: () => renderSidebarPlaylists(),
+    escapeHtml,
+});
 
 function getLastWasmErrorMessage() {
     try {
@@ -106,7 +63,7 @@ async function parseDatabase() {
     appState.isConnected = true;
     updateConnectionStatus(true);
     enableUIIfReady({ wasmReady: appState.wasmReady, isConnected: appState.isConnected });
-    startIpodConnectionMonitor();
+    ipodMonitor.start();
 
     await refreshCurrentView();
     log('Database loaded successfully', 'success');
@@ -203,156 +160,39 @@ async function refreshTracks() {
     log('Refreshed track list', 'info');
 }
 
-function setUploadModalState({ title, status, detail, percent, showOk, okLabel } = {}) {
-    const titleEl = document.getElementById('uploadTitle');
-    const statusEl = document.getElementById('uploadStatus');
-    const detailEl = document.getElementById('uploadDetail');
-    const barEl = document.getElementById('uploadProgress');
-    const actionsEl = document.getElementById('uploadActions');
-    const okBtn = document.getElementById('uploadOkBtn');
+const uploadQueue = createUploadQueue({
+    appState,
+    log,
+    readAudioMetadata,
+    rerenderAllTracksIfVisible,
+});
 
-    if (titleEl && typeof title === 'string') titleEl.textContent = title;
-    if (statusEl && typeof status === 'string') statusEl.textContent = status;
-    if (detailEl && typeof detail === 'string') detailEl.textContent = detail;
-    if (barEl && Number.isFinite(percent)) barEl.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+const trackOps = createTrackOps({
+    appState,
+    wasm,
+    paths,
+    log,
+    logWasmError,
+    refreshCurrentView,
+    loadPlaylists,
+});
 
-    if (actionsEl) actionsEl.style.display = showOk ? 'flex' : 'none';
-    if (okBtn && typeof okLabel === 'string') okBtn.textContent = okLabel;
-}
-
-function dismissUploadModal() {
-    // Reset modal back to default state
-    setUploadModalState({
-        title: 'Uploading',
-        status: 'Preparing...',
-        detail: '',
-        percent: 0,
-        showOk: false,
-        okLabel: 'OK',
-    });
-    modals.hideUpload();
-}
-
-async function saveDatabase() {
-    if (!appState.isConnected) {
-        log('Please connect an iPod first', 'warning');
-        return;
-    }
-
-    // Always show the modal for the full sync (staging + iPod upload)
-    modals.showUpload();
-    setUploadModalState({
-        title: 'Uploading',
-        status: 'Preparing...',
-        detail: '',
-        percent: 0,
-        showOk: false,
-    });
-
-    // 1) Process queued uploads (read bytes -> write into WASM FS + add tracks)
-    const queue = appState.pendingUploads || [];
-    const toStage = queue.filter((q) => q.status !== 'staged');
-    if (toStage.length > 0) {
-        log(`Staging ${toStage.length} queued track(s)...`, 'info');
-        setUploadModalState({ status: `Uploading... (${toStage.length} track${toStage.length !== 1 ? 's' : ''})` });
-
-        for (let i = 0; i < toStage.length; i++) {
-            const item = toStage[i];
-            const file = item.kind === 'handle' ? await item.handle.getFile() : item.file;
-            updateUploadProgress(i + 1, toStage.length, file?.name || item.name || 'Unknown');
-            const meta = await getOrComputeQueuedMeta(item, file);
-            const ok = await uploadSingleTrack(file, meta);
-            if (ok) item.status = 'staged';
-        }
-
-        // Keep pending uploads until the FULL sync finishes successfully
-        appState.pendingUploads = [...queue];
-        rerenderAllTracksIfVisible();
-    }
-
-    // 2) Write iTunesDB (hash/checksum generation)
-    log('Syncing iPod database...', 'info');
-    setUploadModalState({ status: 'Preparing database...', detail: '' });
-    const result = wasm.wasmCallWithError('ipod_write_db');
-    if (result !== 0) {
-        setUploadModalState({
-            title: 'Upload failed',
-            status: 'Failed to prepare database.',
-            detail: 'Please check the console log for details.',
-            showOk: true,
-            okLabel: 'OK',
-        });
-        return;
-    }
-
-    // 3) Copy iTunesDB (+ optional iTunesSD) from WASM FS -> real iPod filesystem
-    try {
-        setUploadModalState({ status: 'Uploading to iPod...', detail: '', percent: 0 });
-        const res = await fsSync.syncDbToIpod(appState.ipodHandle, {
-            onProgress: ({ percent, detail }) => {
-                setUploadModalState({
-                    title: 'Syncing to iPod...',
-                    status: 'Syncing to iPod...',
-                    detail: detail || '',
-                    percent,
-                    showOk: false,
-                });
-            }
-        });
-
-        if (!res?.ok) {
-            setUploadModalState({
-                title: 'Upload finished with errors',
-                status: 'Some files could not be uploaded.',
-                detail: 'Please check the console log for details.',
-                percent: 100,
-                showOk: true,
-                okLabel: 'OK',
-            });
-            return;
-        }
-
-        // 3b) Apply deferred file deletions on the real iPod filesystem
-        const pendingDeletes = appState.pendingFileDeletes || [];
-        if (pendingDeletes.length > 0) {
-            for (const relFsPath of pendingDeletes) {
-                try {
-                    await fsSync.deleteFileFromIpodRelativePath(appState.ipodHandle, relFsPath);
-                    log(`Deleted file: ${relFsPath}`, 'info');
-                } catch (e) {
-                    log(`Could not delete file: ${relFsPath} (${e?.message || e})`, 'warning');
-                }
-            }
-        }
-    } catch (e) {
-        log(`Sync failed: ${e?.message || e}`, 'error');
-        setUploadModalState({
-            title: 'Upload failed',
-            status: 'Uploading to iPod failed.',
-            detail: 'Please check the console log for details.',
-            showOk: true,
-            okLabel: 'OK',
-        });
-        return;
-    }
-
-    // Clear queue only after successful iPod sync so the '*' goes away
-    appState.pendingUploads = [];
-    appState.pendingFileDeletes = [];
-
-    // 4) Refresh UI
-    await refreshCurrentView();
-    log('Sync complete', 'success');
-
-    setUploadModalState({
-        title: 'Done syncing!',
-        status: 'Done syncing! Safe to disconnect.',
-        detail: '',
-        percent: 100,
-        showOk: true,
-        okLabel: 'OK',
-    });
-}
+const syncPipeline = createSyncPipeline({
+    appState,
+    wasm,
+    fsSync,
+    paths,
+    log,
+    logWasmError,
+    modals,
+    refreshCurrentView,
+    rerenderAllTracksIfVisible,
+    getOrComputeQueuedMeta: uploadQueue.getOrComputeQueuedMeta,
+    readAudioMetadata,
+    transcodeFlacToAlacM4a,
+    getFiletypeFromName,
+    formatDuration,
+});
 
 // === Connect / FS ===
 async function selectIpodFolder() {
@@ -493,188 +333,9 @@ async function deletePlaylist(playlistIndex) {
 }
 
 // === Track management ===
-async function deleteTrack(trackId) {
-    if (!confirm('Are you sure you want to delete this track?')) return;
-
-    // Grab the file path before removing the track (indexes shift after delete).
-    const track = wasm.wasmGetJson('ipod_get_track_json', trackId);
-    const ipodPath = track?.ipod_path;
-    const relFsPath = ipodPath ? paths.toRelFsPathFromIpodDbPath(ipodPath) : null;
-
-    const result = wasm.wasmCallWithError('ipod_remove_track', trackId);
-    if (result !== 0) return;
-
-    // Defer the actual file delete until the next "Sync iPod".
-    if (relFsPath) {
-        appState.pendingFileDeletes = [...(appState.pendingFileDeletes || []), relFsPath];
-        log(`Marked for deletion on next sync: ${relFsPath}`, 'info');
-    }
-
-    await refreshCurrentView();
-    log(`Deleted track ID: ${trackId}`, 'success');
-}
-
-async function addTrackToPlaylist(trackId, playlistIndex) {
-    const playlists = appState.playlists;
-    if (playlistIndex < 0 || playlistIndex >= playlists.length) {
-        log('Invalid playlist index', 'error');
-        return;
-    }
-    const playlist = playlists[playlistIndex];
-    if (playlist.is_master) {
-        log('Cannot add tracks to master playlist directly', 'warning');
-        return;
-    }
-
-    const result = wasm.wasmCall('ipod_playlist_add_track', playlistIndex, trackId);
-    if (result === 0) {
-        await loadPlaylists();
-        log(`Added track to playlist: ${playlist.name}`, 'success');
-    } else {
-        logWasmError('Failed to add track');
-    }
-}
-
-async function removeTrackFromPlaylist(trackId) {
-    const idx = appState.currentPlaylistIndex;
-    const playlists = appState.playlists;
-    if (idx < 0 || idx >= playlists.length) {
-        log('No playlist selected', 'warning');
-        return;
-    }
-    const playlist = playlists[idx];
-    if (playlist.is_master) {
-        log('Cannot remove tracks from master playlist', 'warning');
-        return;
-    }
-    if (!confirm(`Remove this track from "${playlist.name}"?`)) return;
-
-    const result = wasm.wasmCall('ipod_playlist_remove_track', idx, trackId);
-    if (result !== 0) {
-        logWasmError('Failed to remove track');
-        return;
-    }
-
-    await refreshCurrentView();
-    log(`Removed track from playlist: ${playlist.name}`, 'success');
-}
-
-// === Upload ===
-function updateUploadProgress(current, total, filename) {
-    const percent = Math.round((current / total) * 100);
-    setUploadModalState({
-        title: 'Uploading...',
-        status: `Uploading... ${current} of ${total}`,
-        detail: filename,
-        percent,
-        showOk: false,
-    });
-}
-
-function appendPendingUploads(queued) {
-    appState.pendingUploads = [...(appState.pendingUploads || []), ...queued];
-    log(`Queued ${queued.length} track(s). Click “Sync iPod” to transfer.`, 'success');
-    rerenderAllTracksIfVisible();
-}
-
-async function enrichQueuedUploadsWithTags(queued, getFile) {
-    // Best-effort metadata read (fast; does not stage audio into WASM FS)
-    for (const item of queued) {
-        try {
-            const file = await getFile(item);
-            const { tags, props } = await readAudioMetadata(file);
-            item.meta = {
-                title: tags.title,
-                artist: tags.artist,
-                album: tags.album,
-                genre: tags.genre,
-                durationMs: props.duration,
-                bitrateKbps: props.bitrate,
-                samplerateHz: props.samplerate,
-                trackNr: tags.track || 0,
-                year: tags.year || 0,
-            };
-        } catch (_) {
-            // ignore
-        }
-    }
-    // Trigger UI refresh with updated metadata
-    appState.pendingUploads = [...(appState.pendingUploads || [])];
-    rerenderAllTracksIfVisible();
-}
-
-async function getOrComputeQueuedMeta(item, file) {
-    // If the user hits "Sync iPod" before enrichment finishes, compute metadata once here.
-    const existing = item?.meta;
-    const hasCoreFields =
-        typeof existing?.title === 'string' &&
-        typeof existing?.artist === 'string' &&
-        typeof existing?.album === 'string' &&
-        typeof existing?.genre === 'string' &&
-        Number.isFinite(existing?.durationMs) &&
-        Number.isFinite(existing?.bitrateKbps) &&
-        Number.isFinite(existing?.samplerateHz);
-
-    if (hasCoreFields) return existing;
-
-    const { tags, props } = await readAudioMetadata(file);
-    const computed = {
-        title: tags.title,
-        artist: tags.artist,
-        album: tags.album,
-        genre: tags.genre,
-        durationMs: props.duration,
-        bitrateKbps: props.bitrate,
-        samplerateHz: props.samplerate,
-        trackNr: tags.track || 0,
-        year: tags.year || 0,
-    };
-
-    if (item) item.meta = computed;
-    return computed;
-}
-
-function queueUploads({ kind, items, getFileForTags }) {
-    const queued = (items || []).map((value) => ({
-        kind,
-        handle: kind === 'handle' ? value : undefined,
-        file: kind === 'file' ? value : undefined,
-        name: value?.name || 'Unknown',
-        status: 'queued',
-        meta: null,
-    }));
-
-    appendPendingUploads(queued);
-
-    if (getFileForTags) {
-        void enrichQueuedUploadsWithTags(queued, getFileForTags);
-    }
-}
-
-function queueFileHandlesForSync(fileHandles) {
-    queueUploads({
-        kind: 'handle',
-        items: fileHandles,
-        getFileForTags: (item) => item.handle.getFile(),
-    });
-}
-
-function queueFilesForSync(files) {
-    queueUploads({
-        kind: 'file',
-        items: files,
-        getFileForTags: (item) => item.file,
-    });
-}
-
-function removeQueuedTrack(queueIndex) {
-    const q = [...(appState.pendingUploads || [])];
-    if (queueIndex < 0 || queueIndex >= q.length) return;
-    q.splice(queueIndex, 1);
-    appState.pendingUploads = q;
-    rerenderAllTracksIfVisible();
-    log('Removed queued track', 'info');
-}
+const deleteTrack = trackOps.deleteTrack;
+const addTrackToPlaylist = trackOps.addTrackToPlaylist;
+const removeTrackFromPlaylist = trackOps.removeTrackFromPlaylist;
 
 async function uploadTracks() {
     try {
@@ -682,103 +343,15 @@ async function uploadTracks() {
             multiple: true,
             types: [{
                 description: 'Audio Files',
-                accept: { 'audio/*': ['.mp3', '.m4a', '.aac', '.wav', '.aiff'] }
+                accept: { 'audio/*': ['.mp3', '.m4a', '.aac', '.wav', '.aiff', '.flac'] }
             }]
         });
 
         if (fileHandles.length === 0) return;
-        queueFileHandlesForSync(fileHandles);
+        uploadQueue.queueFileHandlesForSync(fileHandles);
     } catch (e) {
         if (e.name !== 'AbortError') log(`Upload error: ${e.message}`, 'error');
     }
-}
-
-async function uploadSingleTrack(file, precomputedMeta = null) {
-    if (!file) return false;
-    // Reuse queued metadata if available so we don't re-parse on sync.
-    const meta = precomputedMeta || (await getOrComputeQueuedMeta(null, file));
-    const audioProps = {
-        duration: meta.durationMs,
-        bitrate: meta.bitrateKbps,
-        samplerate: meta.samplerateHz,
-    };
-
-    const filetype = getFiletypeFromName(file.name);
-
-    const trackIndex = wasm.wasmAddTrack({
-        title: meta.title || file.name.replace(/\.[^/.]+$/, ''),
-        artist: meta.artist,
-        album: meta.album,
-        genre: meta.genre,
-        trackNr: meta.trackNr || 0,
-        cdNr: 0,
-        year: meta.year || 0,
-        durationMs: audioProps.duration,
-        bitrateKbps: audioProps.bitrate,
-        samplerateHz: audioProps.samplerate,
-        sizeBytes: file.size,
-        filetype,
-    });
-
-    if (trackIndex < 0) {
-        logWasmError('Failed to add track');
-        return false;
-    }
-
-    const destPathPtr = wasm.wasmCallWithStrings('ipod_get_track_dest_path', [file.name]);
-    if (!destPathPtr) {
-        log('Failed to get destination path', 'error');
-        return false;
-    }
-
-    const destPath = wasm.wasmGetString(destPathPtr);
-    wasm.wasmCall('ipod_free_string', destPathPtr);
-    if (!destPath) {
-        log('Failed to read destination path', 'error');
-        return false;
-    }
-
-    const relFsPath = paths.toRelFsPathFromVfs(destPath);
-
-    // Reserve this path in MEMFS to avoid collisions when generating multiple tracks.
-    // (We do NOT stage audio bytes to MEMFS.)
-    try {
-        fsSync.reserveVirtualPath(destPath);
-    } catch (_) {
-        // best-effort
-    }
-
-    // Upload audio directly to the real iPod filesystem (no MEMFS audio staging)
-    try {
-        await fsSync.writeFileToIpodRelativePath(appState.ipodHandle, relFsPath, file);
-    } catch (e) {
-        log(`Failed to write file to iPod: ${e?.message || e}`, 'error');
-        // Roll back the track entry we already added to the DB
-        wasm.wasmCallWithError('ipod_remove_track', trackIndex);
-        return false;
-    }
-
-    // Finalize track metadata WITHOUT requiring the file to exist in MEMFS.
-    const finalizePathPtr = wasm.wasmAllocString(destPath);
-    const result = wasm.wasmCallWithError('ipod_finalize_last_track_no_stat', finalizePathPtr, file.size);
-    wasm.wasmFreeString(finalizePathPtr);
-
-    if (result !== 0) {
-        const ipodPath = paths.toIpodDbPathFromRel(relFsPath) || '';
-        const setPathRes = wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackIndex]);
-        if (setPathRes !== 0) {
-            wasm.wasmCallWithError('ipod_remove_track', trackIndex);
-            return false;
-        }
-    }
-
-    const idx = appState.currentPlaylistIndex;
-    if (idx >= 0 && idx < appState.playlists.length) {
-        wasm.wasmCall('ipod_playlist_add_track', idx, trackIndex);
-    }
-
-    log(`Added: ${meta.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
-    return true;
 }
 
 // === Search / playlist selection ===
@@ -843,7 +416,7 @@ function initDragAndDrop() {
             return;
         }
 
-        queueFilesForSync(files);
+        uploadQueue.queueFilesForSync(files);
     });
 }
 
@@ -854,9 +427,9 @@ const contextMenu = createContextMenu({
     getCurrentPlaylistIndex: () => appState.currentPlaylistIndex,
     actions: {
         deletePlaylist,
-        deleteTrack,
-        addTrackToPlaylist,
-        removeTrackFromPlaylist,
+        deleteTrack: trackOps.deleteTrack,
+        addTrackToPlaylist: trackOps.addTrackToPlaylist,
+        removeTrackFromPlaylist: trackOps.removeTrackFromPlaylist,
     }
 });
 
@@ -865,24 +438,24 @@ Object.assign(window, {
     toggleLogPanel,
     selectIpodFolder,
     uploadTracks,
-    saveDatabase,
+    saveDatabase: syncPipeline.saveDatabase,
     refreshTracks,
     showNewPlaylistModal,
     hideNewPlaylistModal,
     createPlaylist,
     selectPlaylist,
     filterTracks,
-    deleteTrack,
-    addTrackToPlaylist,
-    removeTrackFromPlaylist,
+    deleteTrack: trackOps.deleteTrack,
+    addTrackToPlaylist: trackOps.addTrackToPlaylist,
+    removeTrackFromPlaylist: trackOps.removeTrackFromPlaylist,
     hideContextMenu: contextMenu.hideContextMenu,
     setupFirewireGuid,
     skipFirewireSetup,
     dismissWelcome,
     hideBrowserCompatModal,
     hideIpodNotDetectedModal,
-    removeQueuedTrack,
-    dismissUploadModal,
+    removeQueuedTrack: uploadQueue.removeQueuedTrack,
+    dismissUploadModal: syncPipeline.dismissUploadModal,
 });
 
 // === Initialization ===
@@ -919,7 +492,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        if (appState.isConnected) saveDatabase();
+        if (appState.isConnected) syncPipeline.saveDatabase();
     }
 });
 

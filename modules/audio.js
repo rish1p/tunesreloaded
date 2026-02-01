@@ -2,8 +2,9 @@
  * Audio helpers (tags + duration) that work in the browser.
  */
 
-// Browser ESM import (no bundler). We intentionally avoid decoding audio.
-import { parseBlob } from 'https://esm.sh/music-metadata@11.11.0?bundle';
+// Bundled by Vite; avoids CDN imports.
+// We intentionally avoid decoding audio.
+import { parseBlob } from 'music-metadata';
 
 export function getFiletypeFromName(filename) {
     const lower = String(filename || '').toLowerCase();
@@ -15,7 +16,7 @@ export function getFiletypeFromName(filename) {
 
 export function isAudioFile(filename) {
     const ext = String(filename || '').toLowerCase().split('.').pop();
-    return ['mp3', 'm4a', 'aac', 'wav', 'aiff'].includes(ext);
+    return ['mp3', 'm4a', 'aac', 'wav', 'aiff', 'flac'].includes(ext);
 }
 
 function fallbackTagsFromFilename(file) {

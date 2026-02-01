@@ -19,3 +19,13 @@ Thumbs.db
 # Environment files
 .env
 .env.local
+.env.*
+
+# Netlify local state
+.netlify/
+
+# Node deps (used for vendoring ffmpeg assets)
+node_modules/
+
+# Vite build output
+dist/

@@ -117,14 +117,15 @@ EMFLAGS=(
     "--no-entry"
 )
 
-# Output files
-OUTPUT_JS="ipod_manager.js"
-OUTPUT_WASM="ipod_manager.wasm"
+# Output files (put artifacts in Vite's public/ so they are served as static assets)
+OUTPUT_JS="public/ipod_manager.js"
+OUTPUT_WASM="public/ipod_manager.wasm"
 
 echo -e "${YELLOW}Compiling ipod_manager.c to WASM...${NC}"
 echo ""
 
 # Build command - include thread stubs before libraries
+mkdir -p public
 CMD="emcc ipod_manager.c ${THREAD_STUBS} ${CFLAGS[*]} ${INCLUDE_PATHS[*]} ${LIB_PATHS[*]} ${LIBS[*]} ${EMFLAGS[*]} -o ${OUTPUT_JS}"
 
 echo "Build command:"
