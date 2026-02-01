@@ -374,7 +374,9 @@
 
         .track-table {
             width: 100%;
-            border-collapse: collapse;
+            /* Sticky table headers behave more reliably with separate borders */
+            border-collapse: separate;
+            border-spacing: 0;
         }
 
         .track-table th,
@@ -385,7 +387,10 @@
         }
 
         .track-table th {
-            background: rgba(0, 0, 0, 0.3);
+            /* Make header opaque so rows can't show through while scrolling */
+            background: rgba(15, 15, 22, 0.92);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
             color: var(--itunes-silver);
             font-size: 11px;
             font-weight: 600;
@@ -393,7 +398,9 @@
             letter-spacing: 0.3px;
             position: sticky;
             top: 0;
-            z-index: 10;
+            z-index: 30;
+            background-clip: padding-box;
+            box-shadow: 0 1px 0 var(--glass-border);
         }
 
         .track-table tr:hover {
