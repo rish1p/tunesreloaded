@@ -2,6 +2,9 @@
  * Audio helpers (tags + duration) that work in the browser.
  */
 
+// Browser ESM import (no bundler). We intentionally avoid decoding audio.
+import { parseBlob } from 'https://esm.sh/music-metadata@11.11.0?bundle';
+
 export function getFiletypeFromName(filename) {
     const lower = String(filename || '').toLowerCase();
     if (lower.endsWith('.m4a') || lower.endsWith('.aac')) return 'AAC audio file';
@@ -15,55 +18,23 @@ export function isAudioFile(filename) {
     return ['mp3', 'm4a', 'aac', 'wav', 'aiff'].includes(ext);
 }
 
-export function readAudioTags(file) {
-    return new Promise((resolve) => {
-        if (typeof globalThis.jsmediatags === 'undefined') {
-            resolve({
-                title: file.name.replace(/\.[^/.]+$/, ''),
-                artist: 'Unknown Artist',
-                album: 'Unknown Album',
-                genre: '',
-                track: 0,
-                year: 0,
-            });
-            return;
-        }
-
-        globalThis.jsmediatags.read(file, {
-            onSuccess: (tag) => {
-                const tags = tag.tags || {};
-                resolve({
-                    title: tags.title || file.name.replace(/\.[^/.]+$/, ''),
-                    artist: tags.artist || 'Unknown Artist',
-                    album: tags.album || 'Unknown Album',
-                    genre: tags.genre || '',
-                    track: tags.track ? parseInt(tags.track) : 0,
-                    year: tags.year ? parseInt(tags.year) : 0,
-                });
-            },
-            onError: () => {
-                const title = file.name.replace(/\.[^/.]+$/, '');
-                const match = title.match(/^(.+?)\s*-\s*(.+)$/);
-                resolve({
-                    title: match ? match[2].trim() : title,
-                    artist: match ? match[1].trim() : 'Unknown Artist',
-                    album: 'Unknown Album',
-                    genre: '',
-                    track: 0,
-                    year: 0,
-                });
-            }
-        });
-    });
+function fallbackTagsFromFilename(file) {
+    const title = file.name.replace(/\.[^/.]+$/, '');
+    const match = title.match(/^(.+?)\s*-\s*(.+)$/);
+    return {
+        title: match ? match[2].trim() : title,
+        artist: match ? match[1].trim() : 'Unknown Artist',
+        album: 'Unknown Album',
+        genre: '',
+        track: 0,
+        year: 0,
+    };
 }
 
-export async function getAudioProperties(file) {
-    // IMPORTANT: Never return NaN/Infinity here.
-    // Emscripten coerces NaN/Infinity to 0 for int args, producing 0:00 durations on-device.
-    const DEFAULT = { duration: 180000, bitrate: 192, samplerate: 44100 }; // 3:00 fallback
-
-    // Fast path: HTMLAudioElement metadata (can be Infinity for some MP3s).
-    const meta = await new Promise((resolve) => {
+async function getDurationViaHtmlAudioMetadata(file) {
+    // This does not decode PCM; it just asks the browser for container metadata.
+    // Some MP3s can still report Infinity/NaN; caller must validate.
+    return await new Promise((resolve) => {
         const audio = new Audio();
         audio.preload = 'metadata';
 
@@ -74,43 +45,92 @@ export async function getAudioProperties(file) {
         };
 
         audio.onloadedmetadata = () => {
-            const durationSec = audio.duration;
+            const d = audio.duration;
             cleanup();
-            resolve({ durationSec });
+            resolve(Number.isFinite(d) ? d : null);
         };
 
         audio.onerror = () => {
             cleanup();
-            resolve({ durationSec: null });
+            resolve(null);
         };
 
         audio.src = URL.createObjectURL(file);
     });
+}
 
-    let durationSec = meta.durationSec;
+export async function readAudioMetadata(file) {
+    // IMPORTANT: Never return NaN/Infinity here.
+    // Emscripten coerces NaN/Infinity to 0 for int args, producing 0:00 durations on-device.
+    const DEFAULT_PROPS = { duration: 180000, bitrate: 192, samplerate: 44100 }; // 3:00 fallback
 
-    // Robust fallback: decode to get a real duration when metadata is missing/Infinity/NaN/0.
-    if (!Number.isFinite(durationSec) || durationSec <= 0) {
-        try {
-            const buf = await file.arrayBuffer();
-            const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
-            if (Ctx) {
-                const ctx = new Ctx();
-                const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
-                durationSec = audioBuffer?.duration;
-                try { await ctx.close(); } catch (_) {}
-            }
-        } catch (_) {
-            // ignore; we'll fall back below
+    try {
+        // duration=false avoids full-file scans unless the parser can infer duration from headers.
+        const metadata = await parseBlob(file, { skipCovers: true, skipPostHeaders: true, duration: false });
+
+        const c = metadata?.common || {};
+        const fmt = metadata?.format || {};
+
+        const trackNo = Number.isFinite(c.track?.no) ? c.track.no : (Number.isFinite(c.track) ? c.track : 0);
+        const year = Number.isFinite(c.year) ? c.year : 0;
+
+        const tags = {
+            title: c.title || file.name.replace(/\.[^/.]+$/, ''),
+            artist: c.artist || 'Unknown Artist',
+            album: c.album || 'Unknown Album',
+            genre: (Array.isArray(c.genre) ? c.genre[0] : c.genre) || '',
+            track: Number.isFinite(trackNo) ? trackNo : 0,
+            year,
+        };
+
+        // Prefer music-metadata duration when available
+        let durationSec = Number.isFinite(fmt.duration) && fmt.duration > 0 ? fmt.duration : null;
+        if (!durationSec) {
+            // Cheap fallback: HTML metadata (still avoids full decode)
+            durationSec = await getDurationViaHtmlAudioMetadata(file);
         }
-    }
 
-    if (!Number.isFinite(durationSec) || durationSec <= 0) {
-        return DEFAULT;
-    }
+        const duration = Number.isFinite(durationSec) && durationSec > 0
+            ? Math.max(1, Math.floor(durationSec * 1000))
+            : DEFAULT_PROPS.duration;
 
-    const duration = Math.max(1, Math.floor(durationSec * 1000)); // ms; clamp to non-zero
-    const bitrate = Math.floor((file.size * 8) / durationSec / 1000);
-    return { duration, bitrate: Number.isFinite(bitrate) && bitrate > 0 ? bitrate : 128, samplerate: 44100 };
+        // fmt.bitrate is bits/second; convert to kbps (this is the "real" bitrate from parser).
+        const bitrateKbpsFromFmt = Number.isFinite(fmt.bitrate) ? Math.round(fmt.bitrate / 1000) : null;
+
+        // If parser doesn't provide bitrate, fall back to average bitrate using duration.
+        const avgKbps = Number.isFinite(durationSec) && durationSec > 0
+            ? Math.floor((file.size * 8) / durationSec / 1000)
+            : null;
+
+        const bitrate = (Number.isFinite(bitrateKbpsFromFmt) && bitrateKbpsFromFmt > 0)
+            ? bitrateKbpsFromFmt
+            : (Number.isFinite(avgKbps) && avgKbps > 0 ? avgKbps : DEFAULT_PROPS.bitrate);
+
+        const samplerate = Number.isFinite(fmt.sampleRate) && fmt.sampleRate > 0 ? fmt.sampleRate : DEFAULT_PROPS.samplerate;
+
+        return { tags, props: { duration, bitrate, samplerate } };
+    } catch (_) {
+        // Fallback: filename tags + (optional) HTML duration + average bitrate
+        const tags = fallbackTagsFromFilename(file);
+        const durationSec = await getDurationViaHtmlAudioMetadata(file);
+        const duration = Number.isFinite(durationSec) && durationSec > 0
+            ? Math.max(1, Math.floor(durationSec * 1000))
+            : DEFAULT_PROPS.duration;
+        const avgKbps = Number.isFinite(durationSec) && durationSec > 0
+            ? Math.floor((file.size * 8) / durationSec / 1000)
+            : null;
+        const bitrate = Number.isFinite(avgKbps) && avgKbps > 0 ? avgKbps : DEFAULT_PROPS.bitrate;
+        return { tags, props: { duration, bitrate, samplerate: DEFAULT_PROPS.samplerate } };
+    }
+}
+
+export async function readAudioTags(file) {
+    const m = await readAudioMetadata(file);
+    return m.tags;
+}
+
+export async function getAudioProperties(file) {
+    const m = await readAudioMetadata(file);
+    return m.props;
 }
 

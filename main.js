@@ -1,11 +1,12 @@
 import { createLogger } from './modules/logger.js';
 import { createWasmApi } from './modules/wasmApi.js';
 import { createFsSync } from './modules/fsSync.js';
+import { createPaths } from './modules/paths.js';
 import { createContextMenu } from './modules/contextMenu.js';
 import { createFirewireSetup } from './modules/firewireSetup.js';
 import { createModalManager } from './modules/modalManager.js';
 import { createAppState } from './modules/state.js';
-import { readAudioTags, getAudioProperties, getFiletypeFromName, isAudioFile } from './modules/audio.js';
+import { readAudioMetadata, getFiletypeFromName, isAudioFile } from './modules/audio.js';
 import { renderTracks, renderPlaylists, formatDuration, updateConnectionStatus, enableUIIfReady } from './modules/uiRender.js';
 
 /**
@@ -20,6 +21,7 @@ const appState = createAppState();
 const { log, toggleLogPanel, escapeHtml } = createLogger();
 const wasm = createWasmApi({ log });
 const fsSync = createFsSync({ log, wasm, mountpoint: '/iPod' });
+const paths = createPaths({ wasm, mountpoint: '/iPod' });
 const firewireSetup = createFirewireSetup({ log });
 const modals = createModalManager();
 
@@ -72,7 +74,7 @@ function getAllTracksWithQueued() {
         artist: item.meta?.artist || 'Queued',
         album: item.meta?.album || '',
         genre: item.meta?.genre || '',
-        tracklen: null,
+        tracklen: Number.isFinite(item.meta?.durationMs) ? item.meta.durationMs : null,
     }));
     return [...(appState.tracks || []), ...queued];
 }
@@ -198,7 +200,8 @@ async function saveDatabase() {
             const item = toStage[i];
             const file = item.kind === 'handle' ? await item.handle.getFile() : item.file;
             updateUploadProgress(i + 1, toStage.length, file?.name || item.name || 'Unknown');
-            const ok = await uploadSingleTrack(file);
+            const meta = await getOrComputeQueuedMeta(item, file);
+            const ok = await uploadSingleTrack(file, meta);
             if (ok) item.status = 'staged';
         }
 
@@ -222,10 +225,10 @@ async function saveDatabase() {
         return;
     }
 
-    // 3) Copy iTunesDB + music files from WASM FS -> real iPod filesystem
+    // 3) Copy iTunesDB (+ optional iTunesSD) from WASM FS -> real iPod filesystem
     try {
         setUploadModalState({ status: 'Uploading to iPod...', detail: '', percent: 0 });
-        const res = await fsSync.syncVirtualFSToIpod(appState.ipodHandle, {
+        const res = await fsSync.syncDbToIpod(appState.ipodHandle, {
             onProgress: ({ percent, detail }) => {
                 setUploadModalState({
                     title: 'Uploading to iPod...',
@@ -492,8 +495,18 @@ async function enrichQueuedUploadsWithTags(queued, getFile) {
     for (const item of queued) {
         try {
             const file = await getFile(item);
-            const tags = await readAudioTags(file);
-            item.meta = { title: tags.title, artist: tags.artist, album: tags.album, genre: tags.genre };
+            const { tags, props } = await readAudioMetadata(file);
+            item.meta = {
+                title: tags.title,
+                artist: tags.artist,
+                album: tags.album,
+                genre: tags.genre,
+                durationMs: props.duration,
+                bitrateKbps: props.bitrate,
+                samplerateHz: props.samplerate,
+                trackNr: tags.track || 0,
+                year: tags.year || 0,
+            };
         } catch (_) {
             // ignore
         }
@@ -501,6 +514,37 @@ async function enrichQueuedUploadsWithTags(queued, getFile) {
     // Trigger UI refresh with updated metadata
     appState.pendingUploads = [...(appState.pendingUploads || [])];
     rerenderAllTracksIfVisible();
+}
+
+async function getOrComputeQueuedMeta(item, file) {
+    // If the user hits "Sync iPod" before enrichment finishes, compute metadata once here.
+    const existing = item?.meta;
+    const hasCoreFields =
+        typeof existing?.title === 'string' &&
+        typeof existing?.artist === 'string' &&
+        typeof existing?.album === 'string' &&
+        typeof existing?.genre === 'string' &&
+        Number.isFinite(existing?.durationMs) &&
+        Number.isFinite(existing?.bitrateKbps) &&
+        Number.isFinite(existing?.samplerateHz);
+
+    if (hasCoreFields) return existing;
+
+    const { tags, props } = await readAudioMetadata(file);
+    const computed = {
+        title: tags.title,
+        artist: tags.artist,
+        album: tags.album,
+        genre: tags.genre,
+        durationMs: props.duration,
+        bitrateKbps: props.bitrate,
+        samplerateHz: props.samplerate,
+        trackNr: tags.track || 0,
+        year: tags.year || 0,
+    };
+
+    if (item) item.meta = computed;
+    return computed;
 }
 
 function queueUploads({ kind, items, getFileForTags }) {
@@ -562,27 +606,30 @@ async function uploadTracks() {
     }
 }
 
-async function uploadSingleTrack(file) {
+async function uploadSingleTrack(file, precomputedMeta = null) {
     if (!file) return false;
-    const tags = await readAudioTags(file);
-    const audioProps = await getAudioProperties(file);
-    const buffer = await file.arrayBuffer();
-    const data = new Uint8Array(buffer);
+    // Reuse queued metadata if available so we don't re-parse on sync.
+    const meta = precomputedMeta || (await getOrComputeQueuedMeta(null, file));
+    const audioProps = {
+        duration: meta.durationMs,
+        bitrate: meta.bitrateKbps,
+        samplerate: meta.samplerateHz,
+    };
 
     const filetype = getFiletypeFromName(file.name);
 
     const trackIndex = wasm.wasmAddTrack({
-        title: tags.title || file.name.replace(/\.[^/.]+$/, ''),
-        artist: tags.artist,
-        album: tags.album,
-        genre: tags.genre,
-        trackNr: tags.track || 0,
+        title: meta.title || file.name.replace(/\.[^/.]+$/, ''),
+        artist: meta.artist,
+        album: meta.album,
+        genre: meta.genre,
+        trackNr: meta.trackNr || 0,
         cdNr: 0,
-        year: tags.year || 0,
+        year: meta.year || 0,
         durationMs: audioProps.duration,
         bitrateKbps: audioProps.bitrate,
         samplerateHz: audioProps.samplerate,
-        sizeBytes: data.length,
+        sizeBytes: file.size,
         filetype,
     });
 
@@ -604,16 +651,38 @@ async function uploadSingleTrack(file) {
         return false;
     }
 
-    await fsSync.copyFileToVirtualFS(data, destPath);
+    const relFsPath = paths.toRelFsPathFromVfs(destPath);
 
-    // Use ipod_finalize_last_track which uses the stored track pointer directly
+    // Reserve this path in MEMFS to avoid collisions when generating multiple tracks.
+    // (We do NOT stage audio bytes to MEMFS.)
+    try {
+        fsSync.reserveVirtualPath(destPath);
+    } catch (_) {
+        // best-effort
+    }
+
+    // Upload audio directly to the real iPod filesystem (no MEMFS audio staging)
+    try {
+        await fsSync.writeFileToIpodRelativePath(appState.ipodHandle, relFsPath, file);
+    } catch (e) {
+        log(`Failed to write file to iPod: ${e?.message || e}`, 'error');
+        // Roll back the track entry we already added to the DB
+        wasm.wasmCallWithError('ipod_remove_track', trackIndex);
+        return false;
+    }
+
+    // Finalize track metadata WITHOUT requiring the file to exist in MEMFS.
     const finalizePathPtr = wasm.wasmAllocString(destPath);
-    const result = wasm.wasmCallWithError('ipod_finalize_last_track', finalizePathPtr);
+    const result = wasm.wasmCallWithError('ipod_finalize_last_track_no_stat', finalizePathPtr, file.size);
     wasm.wasmFreeString(finalizePathPtr);
 
     if (result !== 0) {
-        const ipodPath = destPath.replace(/^\/iPod\//, '').replace(/\//g, ':');
-        wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackIndex]);
+        const ipodPath = paths.toIpodDbPathFromRel(relFsPath) || '';
+        const setPathRes = wasm.wasmCallWithStrings('ipod_track_set_path', [ipodPath], [trackIndex]);
+        if (setPathRes !== 0) {
+            wasm.wasmCallWithError('ipod_remove_track', trackIndex);
+            return false;
+        }
     }
 
     const idx = appState.currentPlaylistIndex;
@@ -621,7 +690,7 @@ async function uploadSingleTrack(file) {
         wasm.wasmCall('ipod_playlist_add_track', idx, trackIndex);
     }
 
-    log(`Added: ${tags.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
+    log(`Added: ${meta.title || file.name} (${formatDuration(audioProps.duration)})`, 'success');
     return true;
 }
 

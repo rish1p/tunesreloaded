@@ -57,7 +57,7 @@ export function renderTracks({ tracks, escapeHtml }) {
         const artist = escapeHtml(track.artist || (isQueued ? 'Queued' : 'Unknown'));
         const album = escapeHtml(track.album || 'Unknown');
         const genre = escapeHtml(track.genre || '');
-        const duration = isQueued ? '--:--' : formatDuration(track.tracklen);
+        const duration = formatDuration(track.tracklen);
 
         const actionHtml = isQueued
             ? `<button class="btn btn-secondary" onclick="removeQueuedTrack(${track._queueIndex})" style="padding: 6px 10px; font-size: 12px;">

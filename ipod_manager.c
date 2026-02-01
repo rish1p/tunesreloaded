@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
+#include <ctype.h>
 #include <emscripten.h>
 #include "itdb.h"
 #include "itdb_device.h"
@@ -844,6 +845,94 @@ int ipod_finalize_last_track(const char *dest_filename) {
 }
 
 /**
+ * Finalize the most recently added track WITHOUT stat() or file access.
+ *
+ * This is used when the audio file is written directly to the real iPod
+ * filesystem by JavaScript, and therefore does not exist in MEMFS.
+ *
+ * Sets:
+ * - track->ipod_path (colon format, relative to mountpoint)
+ * - track->filetype_marker (derived from filename suffix)
+ * - track->transferred = TRUE
+ * - track->size (from size_bytes)
+ */
+EMSCRIPTEN_KEEPALIVE
+int ipod_finalize_last_track_no_stat(const char *dest_filename, int size_bytes) {
+    if (!g_itdb) {
+        set_error("No database loaded");
+        return -1;
+    }
+
+    if (!g_last_added_track) {
+        set_error("No track has been added yet");
+        return -1;
+    }
+
+    if (!dest_filename || strlen(g_mountpoint) == 0) {
+        set_error("No destination filename or mountpoint");
+        return -1;
+    }
+
+    /* Ensure dest_filename is under mountpoint */
+    size_t mplen = strlen(g_mountpoint);
+    if (strlen(dest_filename) < mplen || strncmp(dest_filename, g_mountpoint, mplen) != 0) {
+        set_error("Destination file is not under mountpoint");
+        return -1;
+    }
+
+    Itdb_Track *track = g_last_added_track;
+
+    /* Update transferred + size */
+    track->transferred = TRUE;
+    if (size_bytes > 0) {
+        track->size = size_bytes;
+    }
+
+    /* Derive ipod_path exactly like itdb_cp_finalize() does:
+     * - strip mountpoint, ensure it begins with '/'
+     * - convert from FS path to iPod path via itdb_filename_fs2ipod()
+     */
+    g_free(track->ipod_path);
+    track->ipod_path = NULL;
+
+    if ((int)strlen(g_mountpoint) >= (int)strlen(dest_filename)) {
+        set_error("Destination file does not appear to be on the iPod mounted at mountpoint");
+        return -1;
+    }
+
+    if (dest_filename[mplen] == G_DIR_SEPARATOR) {
+        track->ipod_path = g_strdup(&dest_filename[mplen]);
+    } else {
+        track->ipod_path = g_strdup_printf("%c%s", G_DIR_SEPARATOR, &dest_filename[mplen]);
+    }
+
+    if (!track->ipod_path) {
+        set_error("Failed to allocate ipod_path");
+        return -1;
+    }
+
+    itdb_filename_fs2ipod(track->ipod_path);
+
+    /* Derive filetype_marker from suffix, like libgpod's itdb_cp_finalize */
+    const char *suffix = strrchr(dest_filename, '.');
+    if (!suffix) suffix = ".";
+
+    guint32 marker = 0;
+    for (int i = 1; i <= 4; i++) { /* skip '.' */
+        marker = marker << 8;
+        if ((int)strlen(suffix) > i) {
+            marker |= (guint8)toupper((unsigned char)suffix[i]);
+        } else {
+            marker |= (guint8)' ';
+        }
+    }
+    track->filetype_marker = marker;
+
+    log_info("Finalized last track (no-stat): %s", track->ipod_path ? track->ipod_path : "NULL");
+    return 0;
+}
+
+/**
  * Set the iPod path for a track (legacy function - use ipod_track_finalize instead)
  * @track_index: index of track in the tracks list (NOT the track ID!)
  * Kept for backwards compatibility
@@ -1313,32 +1402,36 @@ int ipod_playlist_remove_track(int playlist_index, int track_index) {
 
 /**
  * Convert filesystem path to iPod path format
- * (replaces / with :)
+ * Uses libgpod's canonical conversion (fs -> ipod)
+ *
+ * NOTE: Returns a malloc()'d string (free with ipod_free_string / free()).
  */
 EMSCRIPTEN_KEEPALIVE
 char* ipod_path_to_ipod_format(const char *fs_path) {
     if (!fs_path) return NULL;
 
-    char *ipod_path = g_strdup(fs_path);
-    for (char *p = ipod_path; *p; p++) {
-        if (*p == '/') *p = ':';
-    }
+    char *ipod_path = strdup(fs_path);
+    if (!ipod_path) return NULL;
+
+    itdb_filename_fs2ipod(ipod_path);
 
     return ipod_path;
 }
 
 /**
  * Convert iPod path to filesystem path format
- * (replaces : with /)
+ * Uses libgpod's canonical conversion (ipod -> fs)
+ *
+ * NOTE: Returns a malloc()'d string (free with ipod_free_string / free()).
  */
 EMSCRIPTEN_KEEPALIVE
 char* ipod_path_to_fs_format(const char *ipod_path) {
     if (!ipod_path) return NULL;
 
-    char *fs_path = g_strdup(ipod_path);
-    for (char *p = fs_path; *p; p++) {
-        if (*p == ':') *p = '/';
-    }
+    char *fs_path = strdup(ipod_path);
+    if (!fs_path) return NULL;
+
+    itdb_filename_ipod2fs(fs_path);
 
     return fs_path;
 }

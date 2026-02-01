@@ -137,6 +137,110 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         }
     }
 
+    // Reserve a destination path in MEMFS (empty file) to avoid name collisions
+    // when libgpod generates random filenames based on filesystem existence checks.
+    function reserveVirtualPath(virtualPath) {
+        const FS = getFS();
+        if (!FS) throw new Error('WASM FS not ready');
+        const vp = String(virtualPath || '');
+        if (!vp) return;
+
+        try {
+            // Ensure parent directories exist
+            const parts = vp.split('/').filter(p => p);
+            let dirPath = '';
+            for (let i = 0; i < parts.length - 1; i++) {
+                dirPath += '/' + parts[i];
+                try { FS.mkdir(dirPath); } catch (_) {}
+            }
+
+            // If file already exists, keep it
+            try {
+                FS.stat(vp);
+                return;
+            } catch (_) {
+                // create empty placeholder
+            }
+            FS.writeFile(vp, new Uint8Array());
+        } catch (_) {
+            // best-effort only
+        }
+    }
+
+    async function writeFileToIpodRelativePath(ipodHandle, relativePath, file, { onProgress } = {}) {
+        if (!ipodHandle) throw new Error('No iPod handle');
+        if (!file) throw new Error('No file provided');
+
+        const parts = String(relativePath || '').split('/').filter(Boolean);
+        if (parts.length === 0) throw new Error('Invalid destination path');
+
+        const fileName = parts[parts.length - 1];
+        const dirParts = parts.slice(0, -1);
+
+        // Create directories as needed
+        let currentDir = ipodHandle;
+        for (const dir of dirParts) {
+            currentDir = await currentDir.getDirectoryHandle(dir, { create: true });
+        }
+
+        const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+
+        // Stream copy in chunks to avoid loading the full file in memory.
+        const total = Number(file.size || 0);
+        let written = 0;
+
+        try {
+            const reader = file.stream().getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) {
+                    await writable.write(value);
+                    written += value.byteLength;
+                    if (total > 0) {
+                        const percent = Math.round((written / total) * 100);
+                        try { onProgress?.({ written, total, percent }); } catch (_) {}
+                    }
+                }
+            }
+        } finally {
+            await writable.close();
+        }
+    }
+
+    async function syncDbToIpod(ipodHandle, { onProgress } = {}) {
+        if (!ipodHandle) return { ok: false, errorCount: 1, syncedCount: 0, skippedCount: 0 };
+
+        const tasks = [
+            { virtualPath: `${mountpoint}/iPod_Control/iTunes/iTunesDB`, dirPath: ['iPod_Control', 'iTunes'], fileName: 'iTunesDB', optional: false },
+            { virtualPath: `${mountpoint}/iPod_Control/iTunes/iTunesSD`, dirPath: ['iPod_Control', 'iTunes'], fileName: 'iTunesSD', optional: true },
+        ];
+
+        let done = 0;
+        const total = tasks.length;
+        let errorCount = 0;
+        let syncedCount = 0;
+
+        const report = (detail) => {
+            done += 1;
+            const percent = Math.round((done / total) * 100);
+            try { onProgress?.({ phase: 'ipod', current: done, total, percent, detail }); } catch (_) {}
+        };
+
+        const iPodControlHandle = await ipodHandle.getDirectoryHandle('iPod_Control', { create: true });
+        const iTunesHandle = await iPodControlHandle.getDirectoryHandle('iTunes', { create: true });
+
+        for (const t of tasks) {
+            const ok = await syncVirtualFileToRealInternal(iTunesHandle, t.virtualPath, t.fileName, t.optional);
+            if (!ok && !t.optional) errorCount += 1;
+            if (ok) syncedCount += 1;
+            report(t.fileName);
+        }
+
+        return { ok: errorCount === 0, errorCount, syncedCount, skippedCount: 0 };
+    }
+
     async function syncVirtualFSToIpod(ipodHandle, { onProgress } = {}) {
         if (!ipodHandle) return { ok: false, errorCount: 1, syncedCount: 0, skippedCount: 0 };
         log('Syncing changes to iPod...');
@@ -277,7 +381,10 @@ export function createFsSync({ log, wasm, mountpoint = '/iPod' }) {
         verifyIpodStructure,
         setupWasmFilesystem,
         syncVirtualFSToIpod,
+        syncDbToIpod,
         copyFileToVirtualFS,
+        writeFileToIpodRelativePath,
+        reserveVirtualPath,
     };
 }
 
