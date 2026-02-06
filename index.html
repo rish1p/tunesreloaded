@@ -819,12 +819,13 @@
                     <div class="toolbar">
                         <input type="text" class="search-box" id="searchBox" placeholder="Search..." oninput="filterTracks()">
                         <button class="btn btn-primary" id="uploadBtn" onclick="uploadTracks()" disabled>Upload</button>
+                        <button class="btn btn-primary" id="uploadFolderBtn" onclick="uploadFolder()" disabled>Upload Folder</button>
                         <button class="btn btn-secondary" id="saveBtn" onclick="saveDatabase()" disabled>Sync iPod</button>
                         <button class="btn btn-secondary" id="refreshBtn" onclick="refreshTracks()" disabled>Refresh</button>
                     </div>
 
                     <div class="drop-zone" id="dropZone">
-                        <p>Drop audio files here, or click Upload</p>
+                        <p>Drop audio files here, or click Upload / Upload Folder</p>
                     </div>
 
                     <div class="track-table-container" id="trackTableContainer">

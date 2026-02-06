@@ -26,7 +26,7 @@ export function updateConnectionStatus(connected) {
 
 export function enableUIIfReady({ wasmReady, isConnected }) {
     const ready = Boolean(wasmReady && isConnected);
-    ['uploadBtn', 'saveBtn', 'refreshBtn', 'newPlaylistBtn'].forEach(id => {
+    ['uploadBtn', 'uploadFolderBtn', 'saveBtn', 'refreshBtn', 'newPlaylistBtn'].forEach(id => {
         const el = document.getElementById(id);
         if (el) el.disabled = !ready;
     });

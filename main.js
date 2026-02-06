@@ -270,7 +270,7 @@ let isBrowserSupported = true;
 function dismissWelcome() {
     modals.hideWelcome();
     localStorage.setItem(WELCOME_SEEN_KEY, 'true');
-    
+
     // Show browser compatibility warning if not supported
     if (!isBrowserSupported) {
         modals.showBrowserCompat();
@@ -359,6 +359,59 @@ async function uploadTracks() {
         uploadQueue.queueFileHandlesForSync(fileHandles);
     } catch (e) {
         if (e.name !== 'AbortError') log(`Upload error: ${e.message}`, 'error');
+    }
+}
+
+async function collectAudioFilesFromDirectory(dirHandle, collected = [], onProgress = null) {
+    for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file') {
+            if (isAudioFile(entry.name)) {
+                const file = await entry.getFile();
+                collected.push(file);
+                onProgress?.(collected.length);
+            }
+        } else if (entry.kind === 'directory') {
+            await collectAudioFilesFromDirectory(entry, collected, onProgress);
+        }
+    }
+    return collected;
+}
+
+async function uploadFolder() {
+    const dropZone = document.getElementById('dropZone');
+    const dropZoneText = dropZone?.querySelector('p');
+    const saveBtn = document.getElementById('saveBtn');
+    const originalDropText = dropZoneText?.textContent || '';
+
+    try {
+        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+
+        if (saveBtn) saveBtn.disabled = true;
+        if (dropZoneText) dropZoneText.textContent = 'Scanning folder... Found 0 files';
+
+        const fileHandles = await collectAudioFilesFromDirectory(dirHandle, [], (count) => {
+            if (dropZoneText) dropZoneText.textContent = `Scanning folder... Found ${count} files`;
+        });
+
+        if (dropZoneText) dropZoneText.textContent = originalDropText;
+        if (saveBtn && appState.isConnected && appState.wasmReady) saveBtn.disabled = false;
+
+        if (fileHandles.length === 0) {
+            log('No audio files found in the selected folder', 'warning');
+            return;
+        }
+
+        log(`Found ${fileHandles.length} audio file(s)`, 'success');
+        uploadQueue.queueFilesForSync(fileHandles);
+    } catch (e) {
+        if (dropZoneText) dropZoneText.textContent = originalDropText;
+        if (saveBtn && appState.isConnected && appState.wasmReady) saveBtn.disabled = false;
+
+        if (e.name === 'AbortError') {
+            log('Folder selection cancelled', 'warning');
+        } else {
+            log(`Folder upload error: ${e.message}`, 'error');
+        }
     }
 }
 
@@ -456,6 +509,7 @@ const contextMenu = createContextMenu({
 Object.assign(window, {
     selectIpodFolder,
     uploadTracks,
+    uploadFolder,
     saveDatabase: syncPipeline.saveDatabase,
     refreshTracks,
     showNewPlaylistModal,
@@ -573,4 +627,3 @@ function showConsoleModal() {
 function hideConsoleModal() {
     modals.hide('consoleModal');
 }
-
