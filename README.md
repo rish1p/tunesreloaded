@@ -36,7 +36,7 @@ For reduced memory usage, we stream music files directly to the iPod during sync
 
 ## Known issues / limitations
 
-- No support for 6th/7th gen iPod nano due to different encryption standards (Currently in development)
+- 6th/7th gen iPod nano support is in beta, file an issue or email info@tunesreloaded.com if you run into issues
 - No album artwork support yet
 - Performance may be limited when uploading FLAC's due to high transcoding CPU usage. 
 
