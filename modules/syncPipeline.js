@@ -137,25 +137,6 @@ export function createSyncPipeline({
         return true;
     }
 
-    const DURATION_TOLERANCE_MS = 2000;
-
-    function buildDuplicateIndex() {
-        const index = new Map();
-        for (const t of (appState.tracks || [])) {
-            const key = `${(t.title || '').toLowerCase()}|${(t.artist || '').toLowerCase()}`;
-            if (!index.has(key)) index.set(key, []);
-            index.get(key).push(t.tracklen || 0);
-        }
-        return index;
-    }
-
-    function isDuplicate(dupIndex, title, artist, durationMs) {
-        const key = `${(title || '').toLowerCase()}|${(artist || '').toLowerCase()}`;
-        const durations = dupIndex.get(key);
-        if (!durations) return false;
-        return durations.some(d => Math.abs(d - (durationMs || 0)) <= DURATION_TOLERANCE_MS);
-    }
-
     async function saveDatabase() {
         if (!appState.isConnected) {
             log?.('Please connect an iPod first', 'warning');
@@ -178,9 +159,6 @@ export function createSyncPipeline({
             log?.(`Staging ${toStage.length} queued track(s)...`, 'info');
             setUploadModalState({ status: `Uploading... (${toStage.length} track${toStage.length !== 1 ? 's' : ''})` });
 
-            const dupIndex = buildDuplicateIndex();
-            let skippedCount = 0;
-
             // Keep iPod writes sequential, but allow up to 2 FLAC transcodes to run concurrently
             // in the background (via the transcode pool).
             let completed = 0;
@@ -196,29 +174,10 @@ export function createSyncPipeline({
             const flacTasks = [];
 
             // Kick off FLAC transcodes early so they can overlap with MP3 uploads.
-            // Duplicate check runs on the FLAC's own metadata BEFORE transcoding
-            // to avoid wasting CPU on a convert that would be discarded.
             for (const item of toStage) {
                 const file = item.kind === 'handle' ? await item.handle.getFile() : item.file;
                 const lowerName = String(file?.name || '').toLowerCase();
                 if (!lowerName.endsWith('.flac')) continue;
-
-                const meta = await getOrComputeQueuedMeta(item, file);
-
-                if (isDuplicate(dupIndex, meta.title, meta.artist, meta.durationMs)) {
-                    log?.(`Skipped (already on iPod): ${meta.title} – ${meta.artist}`, 'info');
-                    item.status = 'staged';
-                    skippedCount++;
-                    completed++;
-                    updateUploadProgress(completed, total, file?.name || item.name || 'Unknown');
-                    continue;
-                }
-
-                // Register in dupIndex now (before the async task) to prevent
-                // concurrent FLAC tasks for the same song from both passing the check.
-                const preKey = `${(meta.title || '').toLowerCase()}|${(meta.artist || '').toLowerCase()}`;
-                if (!dupIndex.has(preKey)) dupIndex.set(preKey, []);
-                dupIndex.get(preKey).push(meta.durationMs || 0);
 
                 const task = (async () => {
                     try {
@@ -230,6 +189,7 @@ export function createSyncPipeline({
                             showOk: false,
                         });
 
+                        const meta = await getOrComputeQueuedMeta(item, file);
                         const m4aFile = await transcodeFlacToAlacM4a(file);
 
                         const outMeta = await readAudioMetadata(m4aFile);
@@ -267,25 +227,10 @@ export function createSyncPipeline({
                 if (lowerName.endsWith('.flac')) continue; // handled by background tasks
 
                 const meta = await getOrComputeQueuedMeta(item, file);
-
-                if (isDuplicate(dupIndex, meta.title, meta.artist, meta.durationMs)) {
-                    log?.(`Skipped (already on iPod): ${meta.title} – ${meta.artist}`, 'info');
-                    item.status = 'staged';
-                    skippedCount++;
-                    completed++;
-                    updateUploadProgress(completed, total, file?.name || item.name || 'Unknown');
-                    continue;
-                }
-
                 await enqueueUpload(async () => {
                     updateUploadProgress(completed + 1, total, file?.name || item.name || 'Unknown');
                     const ok = await uploadSingleTrack(file, meta);
-                    if (ok) {
-                        item.status = 'staged';
-                        const key = `${(meta.title || '').toLowerCase()}|${(meta.artist || '').toLowerCase()}`;
-                        if (!dupIndex.has(key)) dupIndex.set(key, []);
-                        dupIndex.get(key).push(meta.durationMs || 0);
-                    }
+                    if (ok) item.status = 'staged';
                     completed += 1;
                     updateUploadProgress(completed, total, file?.name || item.name || 'Unknown');
                 });
@@ -293,10 +238,6 @@ export function createSyncPipeline({
 
             await Promise.allSettled(flacTasks);
             await uploadChain;
-
-            if (skippedCount > 0) {
-                log?.(`Skipped ${skippedCount} duplicate track${skippedCount !== 1 ? 's' : ''} already on iPod`, 'info');
-            }
 
             appState.pendingUploads = [...queue];
             rerenderAllTracksIfVisible?.();
