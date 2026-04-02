@@ -139,6 +139,112 @@ export function createWasmApi({ log, createModule = globalThis.createIPodModule 
         );
     }
 
+    function wasmSetTrackArtwork(trackIndex, imageBytes) {
+        if (!wasmReady || !Module?.ccall) return -1;
+        const bytes = new Uint8Array(imageBytes);
+        if (bytes.length === 0) {
+            log?.('Artwork image is empty', 'error');
+            return -1;
+        }
+        // The caller (metadataEditor) pre-resizes artwork to ≤320×320 JPEG,
+        // so the payload is typically 20-50 KB — well within Emscripten's
+        // stack limit.  Using ccall with 'array' is the most portable way
+        // to pass binary data since this build does not expose HEAPU8 or
+        // wasmMemory on the Module object.
+        try {
+            const result = Module.ccall(
+                'ipod_track_set_artwork_from_data',
+                'number',
+                ['number', 'array', 'number'],
+                [trackIndex, bytes, bytes.length]
+            );
+            if (result !== 0) {
+                const errorPtr = wasmCall('ipod_get_last_error');
+                log?.(`WASM error (ipod_track_set_artwork_from_data): ${wasmGetString(errorPtr) || 'Unknown error'}`, 'error');
+            }
+            return result;
+        } catch (e) {
+            log?.(`Failed to set artwork: ${e.message}`, 'error');
+            return -1;
+        }
+    }
+
+    /**
+     * Set a track's artwork from pre-decoded RGBA pixel data.
+     *
+     * The caller decodes the image via Canvas, resizes to the desired
+     * dimensions, and extracts raw RGBA via getImageData().  This avoids
+     * needing any image-format loaders on the C/WASM side.
+     *
+     * The RGBA payload for 320×320 is ~400 KB which fits comfortably in
+     * Emscripten's default 5 MB stack (ccall 'array' uses stackAlloc).
+     *
+     * @param {number} trackIndex  Track list index.
+     * @param {Uint8Array} rgbaData  Raw RGBA pixel bytes.
+     * @param {number} width   Image width.
+     * @param {number} height  Image height.
+     * @returns {number} 0 = success, -1 = error, -2 = GdkPixbuf not available.
+     */
+    function wasmSetTrackArtworkRGBA(trackIndex, rgbaData, width, height) {
+        if (!wasmReady || !Module?.ccall) return -1;
+        const bytes = new Uint8Array(rgbaData);
+        if (bytes.length === 0) {
+            log?.('RGBA artwork data is empty', 'error');
+            return -1;
+        }
+        const expected = width * height * 4;
+        if (bytes.length !== expected) {
+            log?.(`RGBA data length mismatch: expected ${expected}, got ${bytes.length}`, 'error');
+            return -1;
+        }
+        try {
+            const result = Module.ccall(
+                'ipod_track_set_artwork_from_rgba',
+                'number',
+                ['number', 'array', 'number', 'number', 'number'],
+                [trackIndex, bytes, bytes.length, width, height]
+            );
+            if (result === -2) {
+                log?.('Artwork requires a WASM build with GdkPixbuf. See build.sh.', 'error');
+            } else if (result !== 0) {
+                const errorPtr = wasmCall('ipod_get_last_error');
+                log?.(`WASM error (ipod_track_set_artwork_from_rgba): ${wasmGetString(errorPtr) || 'Unknown error'}`, 'error');
+            }
+            return result;
+        } catch (e) {
+            log?.(`Failed to set RGBA artwork: ${e.message}`, 'error');
+            return -1;
+        }
+    }
+
+    function wasmUpdateTrack(trackIndex, { title, artist, album, genre, trackNr = -1, year = -1, rating = -1 } = {}) {
+        if (!wasmReady || !Module?.ccall) return -1;
+
+        // Pass null to skip a string field (C checks `if (title)` before updating).
+        // Pass '' or a string to update. Never coerce empty → '' since that would clear the field.
+        const safeTitle  = (title  != null && title  !== '') ? String(title)  : null;
+        const safeArtist = (artist != null && artist !== '') ? String(artist) : null;
+        const safeAlbum  = (album  != null && album  !== '') ? String(album)  : null;
+        const safeGenre  = (genre  != null && genre  !== '') ? String(genre)  : null;
+
+        // Pass -1 to skip an int field (C checks `if (field >= 0)` before updating).
+        const safeTrackNr = Number.isFinite(trackNr) && trackNr >= 0 ? Math.floor(trackNr) : -1;
+        const safeYear    = Number.isFinite(year)    && year    >  0 ? Math.floor(year)    : -1;
+        const safeRating  = Number.isFinite(rating)  && rating  >= 0 ? Math.floor(rating)  : -1;
+
+        const result = Module.ccall(
+            'ipod_update_track',
+            'number',
+            ['number', 'string', 'string', 'string', 'string', 'number', 'number', 'number'],
+            [trackIndex, safeTitle, safeArtist, safeAlbum, safeGenre, safeTrackNr, safeYear, safeRating]
+        );
+        if (result !== 0) {
+            const errorPtr = wasmCall('ipod_get_last_error');
+            log?.(`WASM error (ipod_update_track): ${wasmGetString(errorPtr) || 'Unknown error'}`, 'error');
+        }
+        return result;
+    }
+
     return {
         initWasm,
         isReady,
@@ -151,6 +257,9 @@ export function createWasmApi({ log, createModule = globalThis.createIPodModule 
         wasmGetJson,
         wasmCallWithError,
         wasmAddTrack,
+        wasmUpdateTrack,
+        wasmSetTrackArtwork,
+        wasmSetTrackArtworkRGBA,
     };
 }
 

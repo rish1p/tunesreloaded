@@ -15,6 +15,10 @@
 #include "itdb.h"
 #include "itdb_device.h"
 
+#ifdef HAVE_GDKPIXBUF
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#endif
+
 /* Global database pointer */
 static Itdb_iTunesDB *g_itdb = NULL;
 static char g_mountpoint[4096] = "";
@@ -1089,11 +1093,16 @@ int ipod_device_supports_artwork(void) {
 }
 
 /**
- * Set a track's artwork (cover image) from raw image data.
+ * Set a track's artwork (cover image) from raw image data (JPEG/PNG).
  * @param track_index: index of track in the tracks list (same as other track APIs).
  * @param image_data: pointer to raw image bytes (e.g. JPEG/PNG file contents).
  * @param image_data_len: length of image_data in bytes.
  * @return 0 on success, -1 on error (check ipod_get_last_error()).
+ *
+ * NOTE: This function internally calls itdb_track_set_thumbnails_from_data()
+ * which requires GdkPixbuf with image format loaders.  If the WASM build does
+ * not link GdkPixbuf, this will always fail.  Use ipod_track_set_artwork_from_rgba()
+ * instead — it only needs the core GdkPixbuf library (no loaders).
  */
 EMSCRIPTEN_KEEPALIVE
 int ipod_track_set_artwork_from_data(int track_index, const unsigned char *image_data, unsigned int image_data_len) {
@@ -1116,6 +1125,113 @@ int ipod_track_set_artwork_from_data(int track_index, const unsigned char *image
     }
     log_info("Set artwork for track index %d (%u bytes)", track_index, image_data_len);
     return 0;
+}
+
+/**
+ * Set a track's artwork from pre-decoded RGBA pixel data.
+ *
+ * The caller (JavaScript) decodes the image via Canvas and passes raw RGBA
+ * pixel data at the desired dimensions.  This function wraps the pixels in a
+ * GdkPixbuf and hands it to libgpod's thumbnail pipeline, which converts to
+ * the iPod's native format (RGB565, UYVY, etc.) for every required size.
+ *
+ * Benefits over ipod_track_set_artwork_from_data():
+ *   - Only needs the core GdkPixbuf library — no image-format loaders.
+ *   - The heavy image decode/resize happens in JS (Canvas), which is fast.
+ *
+ * Build requirement: link libgdk_pixbuf-2.0.a and pass -DHAVE_GDKPIXBUF
+ * (see build.sh).
+ *
+ * @param track_index  Index of track in the tracks list.
+ * @param rgba_data    Pointer to raw RGBA pixel bytes (4 bytes per pixel,
+ *                     row-major, top-to-bottom).
+ * @param data_len     Total length of rgba_data in bytes (must == width*height*4).
+ * @param width        Image width in pixels.
+ * @param height       Image height in pixels.
+ * @return  0 on success,
+ *         -1 on general error (check ipod_get_last_error()),
+ *         -2 if GdkPixbuf is not available (build without HAVE_GDKPIXBUF).
+ */
+EMSCRIPTEN_KEEPALIVE
+int ipod_track_set_artwork_from_rgba(int track_index,
+                                     const unsigned char *rgba_data,
+                                     unsigned int data_len,
+                                     int width,
+                                     int height)
+{
+#ifdef HAVE_GDKPIXBUF
+    if (!g_itdb) {
+        set_error("No database loaded");
+        return -1;
+    }
+    if (!rgba_data || data_len == 0) {
+        set_error("Null or empty RGBA data");
+        return -1;
+    }
+    if (width <= 0 || height <= 0) {
+        set_error("Invalid dimensions: %dx%d", width, height);
+        return -1;
+    }
+    if (data_len != (unsigned int)(width * height * 4)) {
+        set_error("RGBA data length mismatch: expected %d, got %u",
+                  width * height * 4, data_len);
+        return -1;
+    }
+
+    Itdb_Track *track = (Itdb_Track *)g_list_nth_data(g_itdb->tracks,
+                                                       (guint)track_index);
+    if (!track) {
+        set_error("Track not found at index: %d", track_index);
+        return -1;
+    }
+
+    /* Wrap raw RGBA pixels in a GdkPixbuf — no image decoders needed.
+     * gdk_pixbuf_new_from_data() does NOT copy the data; it just wraps
+     * the pointer.  The pixbuf must not outlive rgba_data.  We pass NULL
+     * for the destroy notify since the caller (Emscripten stack or heap)
+     * owns the buffer. */
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_data(
+        rgba_data,
+        GDK_COLORSPACE_RGB,   /* colour-space  */
+        TRUE,                 /* has_alpha      */
+        8,                    /* bits_per_sample */
+        width,
+        height,
+        width * 4,            /* rowstride       */
+        NULL,                 /* destroy_fn      */
+        NULL                  /* destroy_fn_data */
+    );
+    if (!pixbuf) {
+        set_error("Failed to create GdkPixbuf from RGBA data (%dx%d)",
+                  width, height);
+        return -1;
+    }
+
+    gboolean ok = itdb_track_set_thumbnails_from_pixbuf(track, pixbuf);
+    g_object_unref(pixbuf);
+
+    if (!ok) {
+        set_error("libgpod rejected artwork for track index %d", track_index);
+        return -1;
+    }
+
+    track->has_artwork = 0x01;
+    track->artwork_count = 1;
+    track->time_modified = time(NULL);
+
+    log_info("Set RGBA artwork for track index %d (%dx%d, %u bytes)",
+             track_index, width, height, data_len);
+    return 0;
+
+#else  /* !HAVE_GDKPIXBUF */
+    (void)track_index;
+    (void)rgba_data;
+    (void)data_len;
+    (void)width;
+    (void)height;
+    set_error("Artwork support requires GdkPixbuf (rebuild with -DHAVE_GDKPIXBUF)");
+    return -2;
+#endif
 }
 
 /* ============================================================================

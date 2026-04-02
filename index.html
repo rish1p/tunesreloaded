@@ -596,6 +596,74 @@
             border-color: var(--accent-orange);
         }
 
+        .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--glass-border);
+            border-radius: 6px;
+            color: var(--text-dark);
+            font-family: inherit;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--accent-orange);
+        }
+
+        .form-group select option {
+            background: #1a1a2e;
+            color: var(--text-dark);
+        }
+
+        .edit-metadata-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            column-gap: 16px;
+        }
+
+        .edit-metadata-grid .form-group {
+            grid-column: 1 / -1;
+        }
+
+        .edit-metadata-grid .form-group.half {
+            grid-column: span 1;
+        }
+
+        .artwork-preview {
+            width: 96px;
+            height: 96px;
+            border: 2px dashed var(--glass-border);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: border-color 0.2s;
+        }
+
+        .artwork-preview:hover {
+            border-color: var(--accent-orange);
+        }
+
+        .artwork-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .artwork-placeholder {
+            color: var(--text-mid);
+            font-size: 11px;
+            text-align: center;
+            line-height: 1.4;
+            pointer-events: none;
+        }
+
         /* Progress bar */
         .progress-bar {
             width: 100%;
@@ -973,6 +1041,66 @@
         </div>
     </div>
 
+    <!-- Edit Metadata Modal -->
+    <div class="modal-overlay" id="editMetadataModal">
+        <div class="modal" style="max-width: 480px;">
+            <h2 id="editModalTitle">Edit Track</h2>
+            <div class="edit-metadata-grid">
+                <div class="form-group">
+                    <label for="editTitle">Title</label>
+                    <input type="text" id="editTitle" data-placeholder="Title" placeholder="Title">
+                </div>
+                <div class="form-group">
+                    <label for="editArtist">Artist</label>
+                    <input type="text" id="editArtist" data-placeholder="Artist" placeholder="Artist">
+                </div>
+                <div class="form-group">
+                    <label for="editAlbum">Album</label>
+                    <input type="text" id="editAlbum" data-placeholder="Album" placeholder="Album">
+                </div>
+                <div class="form-group">
+                    <label for="editGenre">Genre</label>
+                    <input type="text" id="editGenre" data-placeholder="Genre" placeholder="Genre">
+                </div>
+                <div class="form-group half">
+                    <label for="editTrackNr">Track #</label>
+                    <input type="number" id="editTrackNr" data-placeholder="Track #" placeholder="Track #" min="0" max="999">
+                </div>
+                <div class="form-group half">
+                    <label for="editYear">Year</label>
+                    <input type="number" id="editYear" data-placeholder="Year" placeholder="Year" min="1900" max="2099">
+                </div>
+                <div class="form-group">
+                    <label for="editRating">Rating</label>
+                    <select id="editRating">
+                        <option value="">— No change —</option>
+                        <option value="0">☆☆☆☆☆ (0 stars)</option>
+                        <option value="20">★☆☆☆☆ (1 star)</option>
+                        <option value="40">★★☆☆☆ (2 stars)</option>
+                        <option value="60">★★★☆☆ (3 stars)</option>
+                        <option value="80">★★★★☆ (4 stars)</option>
+                        <option value="100">★★★★★ (5 stars)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Album Art</label>
+                    <div style="display: flex; align-items: flex-start; gap: 10px;">
+                        <div class="artwork-preview" id="artworkPreview" title="Click to choose artwork">
+                            <span class="artwork-placeholder">Click to<br>set artwork</span>
+                        </div>
+                        <button type="button" class="btn btn-secondary" id="artworkClearBtn"
+                                style="display: none; font-size: 11px; padding: 4px 8px;">✕ Clear</button>
+                    </div>
+                    <input type="file" id="artworkFileInput" accept="image/*" style="display: none;">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="hideEditTrackModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveTrackEdits()">Save</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Context Menu -->
     <div class="context-menu" id="contextMenu">
         <div class="context-menu-item" id="contextDeletePlaylist" style="display: none;">
@@ -980,6 +1108,9 @@
         </div>
         <div class="context-menu-item" id="contextDeleteTrack" style="display: none;">
             Delete Track
+        </div>
+        <div class="context-menu-item" id="contextEditTrack" style="display: none;">
+            Edit Metadata
         </div>
         <div class="context-menu-item context-submenu" id="contextAddToPlaylist" style="display: none;">
             Add to Playlist

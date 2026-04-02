@@ -14,6 +14,7 @@ import { createTrackOps } from './modules/trackOps.js';
 import { createSyncPipeline } from './modules/syncPipeline.js';
 import { createTranscodePool } from './modules/transcode.js';
 import { createTrackSelection } from './modules/trackSelection.js';
+import { createMetadataEditor } from './modules/metadataEditor.js';
 
 /**
  * TunesReloaded - module entrypoint
@@ -184,6 +185,8 @@ const trackOps = createTrackOps({
 });
 
 const trackSelection = createTrackSelection({ appState, log });
+
+const metadataEditor = createMetadataEditor({ wasm, log, refreshCurrentView });
 
 const syncPipeline = createSyncPipeline({
     appState,
@@ -497,6 +500,7 @@ const contextMenu = createContextMenu({
     getCurrentPlaylistIndex: () => appState.currentPlaylistIndex,
     getSelectedTrackIds: () => appState.selectedTrackIds,
     ensureTrackSelected: (trackId) => trackSelection.ensureTrackSelected(trackId),
+    onEditTracks: (trackIds) => metadataEditor.showEditModal(trackIds),
     actions: {
         deletePlaylist,
         deleteTrack: trackOps.deleteTrack,
@@ -524,6 +528,10 @@ Object.assign(window, {
     addTrackToPlaylist: trackOps.addTrackToPlaylist,
     removeTrackFromPlaylist: trackOps.removeTrackFromPlaylist,
     hideContextMenu: contextMenu.hideContextMenu,
+    showEditTrackModal: metadataEditor.showEditModal,
+    hideEditTrackModal: metadataEditor.hideEditModal,
+    saveTrackEdits: metadataEditor.saveTrackEdits,
+    clearArtworkSelection: metadataEditor.clearArtworkSelection,
     setupFirewireGuid,
     skipFirewireSetup,
     dismissWelcome,
@@ -541,6 +549,9 @@ Object.assign(window, {
 // === Initialization ===
 document.addEventListener('DOMContentLoaded', async () => {
     log('TunesReloaded initialized');
+
+    // Wire up artwork file input + preview click handlers
+    metadataEditor.init();
 
     // Check for required web features (no browser sniffing — any browser with these APIs works)
     const requiredFeatures = [];
@@ -568,6 +579,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     contextMenu.attachTrackContextMenus();
     trackSelection.attach();
 
+    // Double-click a track row to open the metadata editor
+    const trackTableBody = document.getElementById('trackTableBody');
+    if (trackTableBody) {
+        trackTableBody.addEventListener('dblclick', (e) => {
+            const row = e.target.closest('tr[data-track-id]');
+            if (!row) return;
+            const trackId = Number(row.getAttribute('data-track-id'));
+            if (Number.isFinite(trackId)) metadataEditor.showEditModal([trackId]);
+        });
+    }
+
     const ok = await wasm.initWasm();
     appState.wasmReady = ok;
     enableUIIfReady({ wasmReady: ok, isConnected: appState.isConnected });
@@ -592,6 +614,25 @@ document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
         if (appState.isConnected) syncPipeline.saveDatabase();
+    }
+
+    if (e.key === 'Escape') {
+        // Fix #3: call hideEditModal() so editingTrackIds and pendingArtwork are reset,
+        // not just modals.hide() which only removes the CSS class.
+        if (document.getElementById('editMetadataModal')?.classList.contains('show')) {
+            metadataEditor.hideEditModal();
+        }
+    }
+
+    if (e.key === 'Enter') {
+        const editModal = document.getElementById('editMetadataModal');
+        if (editModal?.classList.contains('show')) {
+            const active = document.activeElement?.tagName?.toLowerCase();
+            // Fix #6: exclude 'button' — a focused button already fires its click on Enter,
+            // which calls saveTrackEdits() via onclick. Without this guard the function
+            // would be called twice (keydown + click).
+            if (active !== 'select' && active !== 'button') metadataEditor.saveTrackEdits();
+        }
     }
 });
 
